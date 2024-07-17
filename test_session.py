@@ -1,6 +1,6 @@
 import numpy as np
-from dreadmill_session import DreadmillSession
-from patch import Patch
+from environments.dreadmill_session import DreadmillSession
+from environments.components.patch import Patch
 
 DWELL_TIME_FOR_REWARD = 4
 SPATIAL_BUFFER_FOR_VISUAL_CUES = 1.5

@@ -1,6 +1,8 @@
 import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
 
-class DreadmillSession:
+class DreadmillSession(gym.Env):
 
     def __init__(
         self,
@@ -18,7 +20,33 @@ class DreadmillSession:
         self.dwell_time_for_reward = dwell_time_for_reward
         self.spatial_buffer_for_visual_cues = spatial_buffer_for_visual_cues
         self.set_verbosity(verbosity)
+        self.step_vals = np.array([0, 1])
         self.start_new_session(first_patch_start)
+        self.observation_space = spaces.MultiDiscrete(len(patches) + 2)
+        self.action_space = spaces.MultiDiscrete(len(self.step_vals))
+
+
+    # begin gymnasium specific API
+    # note: these functions simply wrap other functions defined later on
+
+    def reset(self, seed=None, options=None):
+        self.start_new_session()
+
+        return self.get_observations(), self.get_info()
+
+
+    def step(self, action):
+        forward_movement_amount = np.dot(self.step_vals, action)
+        reward = self.move_forward(forward_movement_amount)
+        obs = self.get_observations()
+
+        return obs, reward, False, False, self.get_info()
+
+    # end gymnasium API
+
+
+    def get_info(self):
+        return {}
 
 
     def start_new_session(self, first_patch_start=None):
@@ -60,6 +88,8 @@ class DreadmillSession:
 
         self.wprint(f'Position is {self.current_position}')
 
+        immediate_reward = 0
+
         if self.is_agent_in_current_patch(): # if agent is currently in a patch
             if agent_was_out_of_patch:
                 self.wprint('Agent has entered a patch')
@@ -71,7 +101,8 @@ class DreadmillSession:
                 self.reward_site_dwell_time += 1
                 # odor cue given
                 if self.reward_site_dwell_time >= self.dwell_time_for_reward and not self.current_reward_site_attempted:
-                    self.total_reward += self.current_patch.get_reward(current_reward_site_idx)
+                    immediate_reward += self.current_patch.get_reward(current_reward_site_idx)
+                    self.total_reward += immediate_reward
                     self.current_reward_site_attempted = True
                 
                 self.wprint(f'Agent is at reward site {current_reward_site_idx}')
@@ -100,6 +131,7 @@ class DreadmillSession:
 
         self.wprint(f'Total reward is {self.total_reward}')
 
+        return immediate_reward
 
     def generate_next_patch(self):
         roll = np.random.rand()
@@ -134,7 +166,7 @@ class DreadmillSession:
         # observations entirely determined by location
         # there are 2 visual cues plus odor cues equal to the number of patchs
 
-        observations = np.zeros((2 + len(self.patches)))
+        observations = np.zeros((2 + len(self.patches,)))
 
         # [entering_patch_visual_cue, leaving_patch_visual_cue, odor_cue_1, odor_cue_2, ...]
         # if within spatial_buffer_for_visual_cues of start of patch, give `entering_patch_visual_cue`
@@ -146,6 +178,8 @@ class DreadmillSession:
         
         if self.get_reward_site_idx_of_current_pos() != -1:
             observations[2 + self.current_patch_num] = 1
+
+        print(observations)
         
         return observations
 

@@ -1,0 +1,181 @@
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.distributions.categorical import Categorical
+
+class A2CRecurrentAgent:
+    """
+    Implements a recurrent A2C Agent
+    Supports multple environments
+    Implementation adapted from: https://gymnasium.farama.org/tutorials/gymnasium_basics/vector_envs_tutorial/
+    """
+    def __init__(self, network, action_space_dims, n_envs, device="cpu",
+                 critic_weight=0.05, entropy_weight=0.05, learning_rate=7e-4, gamma=0.9):
+        """
+        Initializes recurrent agent: 
+        Default values from Wang et al 2018
+        Args: 
+            network: a torch network to be used/trained
+            action_space_dims: number of dims of action space,
+            n_envs: number of environments
+            device: str of cpu or cuda
+            critic_weight: weight to assign the critic loss during training
+            entropy_weight: weight to assign the entropy loss during training
+            learning_rate: learning rate for optimizer
+            gamma: discount factor
+        """
+        self.net = network
+        self.critic_weight = critic_weight
+        self.entropy_weight = entropy_weight
+        self.learning_rate = learning_rate  # Learning rate for policy optimization
+        self.gamma = gamma  # Discount factor
+        self.action_space_dims = action_space_dims
+        self.n_envs = n_envs
+        self.device = device
+        self.log_probs = []  # Stores probability values of the sampled action
+        self.rewards = []  # Stores the corresponding rewards
+        self.values = [] 
+        self.entropies = []
+        self.actions = []
+
+        self.optimizer = torch.optim.RMSprop(self.net.parameters(), lr=self.learning_rate)
+
+    
+    def sample_action(self, observations):
+        """
+        Given an observation, returns an action.
+        Passes the observation, past action, past reward, and time as inputs into the network
+        Additionally, keeps track of value, log probability of action, and entropy for future updates
+
+        Args:
+            observations: observations for this time [n_envs x obs_size]
+        Returns:
+            actions: Action indexes, with shape [n_envs, ] 
+        """
+        # ensures observations is a tensor
+        observations = torch.tensor(observations).to(self.device)
+        # grabs past actions and rewards
+        past_action_one_hot = self.get_last_action_one_hot()
+        past_reward = self.get_last_reward()
+
+        # input will be [n_envs, (obs_size + action_size + 2)]
+        # the 2 is for reward and time
+        inputs = torch.cat((
+            observations, past_action_one_hot, past_reward.unsqueeze(dim=1)
+        ), dim=1).to(self.device)
+
+        # run through the network
+        action_logits, value = self.net(inputs)
+
+        # sample from action probs
+        distrib = Categorical(logits=action_logits)
+        action = distrib.sample()
+        log_prob = distrib.log_prob(action)
+        entropy = distrib.entropy()
+
+        # keep track of values for future update
+        self.log_probs.append(log_prob)
+        self.values.append(value)
+        self.actions.append(action)
+        self.entropies.append(entropy)
+
+        return action
+    
+
+    def get_last_action_one_hot(self):
+        """
+        Grabs a one-hot encoding representation of the last action
+        Returns zeros if no previous action
+        Returns: 
+            tensor of [n_envs, n_action_space_dims]
+        """
+        past_action_one_hot = torch.zeros(self.n_envs, self.action_space_dims)
+        if len(self.actions) > 0: 
+            # grab that last action list, 
+            last_actions = self.actions[-1]
+            past_action_one_hot[:, last_actions] = 1
+        return past_action_one_hot.to(self.device)
+    
+
+    def get_last_reward(self):
+        """
+        Grabs last reward, returns zeros if no previous rewards
+        Returns: 
+            tensor of [n_envs, ]
+        """
+        past_rewards = self.rewards[-1] if len(self.rewards) > 0 else torch.zeros(self.n_envs)
+        return past_rewards.to(self.device)
+    
+
+    def append_reward(self, reward):
+        """
+        Adds a reward
+        Args:
+            reward: np array of [n_envs, ]
+        """
+        self.rewards.append(torch.tensor(reward))
+
+
+    def get_losses(self):
+        """
+        Calculates the total loss, actor loss, critic loss, and entropy loss of the agent. 
+        Total loss = actor_loss + critic_weight * critic loss + entropy_weight * entropy_loss
+        See: Mnih et al., 2015: https://arxiv.org/abs/1602.01783
+        """
+        T = len(self.rewards)
+
+        # need at least 2 trials before update makes sense
+        if T < 2: 
+            raise ValueError("Need at least 2 timesteps before computing losses")
+
+        log_probs = torch.stack(self.log_probs).to(self.device)
+        rewards = torch.stack(self.rewards).to(self.device)
+        values = torch.stack(self.values).to(self.device)
+        entropies = torch.stack(self.entropies).to(self.device)
+        # make this an object attribute since it's useful for debugging later
+        self.td_errs = torch.zeros((T, self.n_envs)).to(self.device)
+
+        # step through time, calculate td errors (generally advantages)
+        # NOTE: This is implementing vanilla actor critic,
+        # TODO: For generalized impl that supports Monte Carlo methods as well, implement GAE
+        # Schulman et al., 2015: https://arxiv.org/abs/1506.02438
+        for t in reversed(range(T-1)):
+            self.td_errs[t, :] = rewards[t, :] + self.gamma * values[t + 1, :] - values[t, :]
+
+        # want to minimize TD error
+        critic_loss = self.td_errs.pow(2).mean()   
+
+        # A2C actor loss, derived from policy gradient theorem
+        actor_loss = -(self.td_errs.detach() * log_probs).mean()
+
+        # want to ENCOURAGE high entropy, so define negative loss
+        entropy_loss = -entropies.mean()
+
+        total_loss = actor_loss + self.critic_weight * critic_loss + self.entropy_weight * entropy_loss
+        return (total_loss, actor_loss, critic_loss, entropy_loss)
+
+
+    def update(self, total_loss=None):
+        """
+        Updates network parameters via calculated total loss, calculates total 
+        loss if it's not provided. 
+        NOTE: update also resets all states, so as it's currently 
+        implemented, this should only be called at the end of an episode. 
+        """
+        if total_loss is None:
+            total_loss, _, _, _ = self.get_losses()
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        self.optimizer.step()
+        self.reset_state()
+        
+
+    def reset_state(self):
+        """
+        Resets the network, as well as the agent's states. 
+        """
+        self.net.reset_state()
+        self.log_probs = []
+        self.rewards = []
+        self.values = []
+        self.entropies = []
