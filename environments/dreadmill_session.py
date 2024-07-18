@@ -22,21 +22,22 @@ class DreadmillSession(gym.Env):
         self.set_verbosity(verbosity)
         self.step_vals = np.array([0, 1])
         self.start_new_session(first_patch_start)
-        self.observation_space = spaces.MultiDiscrete(len(patches) + 2)
-        self.action_space = spaces.MultiDiscrete(len(self.step_vals))
+        self.observation_space = spaces.MultiDiscrete(np.ones(len(patches) + 2, dtype=int))
+        self.action_space = spaces.Discrete(len(self.step_vals))
 
 
     # begin gymnasium specific API
     # note: these functions simply wrap other functions defined later on
 
     def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
         self.start_new_session()
 
         return self.get_observations(), self.get_info()
 
 
     def step(self, action):
-        forward_movement_amount = np.dot(self.step_vals, action)
+        forward_movement_amount = self.step_vals[action]
         reward = self.move_forward(forward_movement_amount)
         obs = self.get_observations()
 
@@ -133,6 +134,7 @@ class DreadmillSession(gym.Env):
 
         return immediate_reward
 
+
     def generate_next_patch(self):
         roll = np.random.rand()
         trans_probs = self.transition_mat[self.last_patch_num]
@@ -166,7 +168,7 @@ class DreadmillSession(gym.Env):
         # observations entirely determined by location
         # there are 2 visual cues plus odor cues equal to the number of patchs
 
-        observations = np.zeros((2 + len(self.patches,)))
+        observations = np.zeros((2 + len(self.patches,)), dtype=int)
 
         # [entering_patch_visual_cue, leaving_patch_visual_cue, odor_cue_1, odor_cue_2, ...]
         # if within spatial_buffer_for_visual_cues of start of patch, give `entering_patch_visual_cue`
@@ -178,8 +180,6 @@ class DreadmillSession(gym.Env):
         
         if self.get_reward_site_idx_of_current_pos() != -1:
             observations[2 + self.current_patch_num] = 1
-
-        print(observations)
         
         return observations
 

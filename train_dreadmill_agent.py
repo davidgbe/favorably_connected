@@ -101,8 +101,8 @@ def main():
     for sample_phase in tqdm(range(N_UPDATES)):
         # at the start of training reset all envs to get an initial state
         # play n steps in our parallel environments to collect data
-        obs, info = envs.reset()
-        print('gets here')
+        obs, info = envs.reset(seed=42)
+
         total_rewards = np.empty((NUM_ENVS, N_STEPS_PER_UPDATE))
         for step in range(N_STEPS_PER_UPDATE):
             action = agent.sample_action(obs)
