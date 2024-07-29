@@ -139,8 +139,12 @@ class A2CRecurrentAgent:
         # NOTE: This is implementing vanilla actor critic,
         # TODO: For generalized impl that supports Monte Carlo methods as well, implement GAE
         # Schulman et al., 2015: https://arxiv.org/abs/1506.02438
+
+        rolling_rewards = values[T-1, :].clone()
+
         for t in reversed(range(T-1)):
-            self.td_errs[t, :] = rewards[t, :] + self.gamma * values[t + 1, :] - values[t, :]
+            rolling_rewards = self.gamma * rolling_rewards + rewards[t, :]
+            self.td_errs[t, :] = rolling_rewards - values[t, :]
 
         # want to minimize TD error
         critic_loss = self.td_errs.pow(2).mean()   
