@@ -2,7 +2,7 @@ import numpy as np
 import os
 import gymnasium as gym
 from tqdm import tqdm
-from environments.dreadmill_session import DreadmillSession
+from environments.treadmill_session import TreadmillSession
 from environments.components.patch import Patch
 from aux_funcs import zero_pad
 from agents.naive_agent import NaiveAgent
@@ -34,7 +34,7 @@ OUTPUT_SAVE_RATE = 200
 OUTPUT_DIR = '../data/naive_agent_outputs'
 
 
-def make_dreadmill_environment(env_idx):
+def make_treadmill_environment(env_idx):
 
     def make_env():
 
@@ -58,7 +58,7 @@ def make_dreadmill_environment(env_idx):
 
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
-        sesh = DreadmillSession(
+        sesh = TreadmillSession(
             patches,
             transition_mat,
             10,
@@ -72,7 +72,7 @@ def make_dreadmill_environment(env_idx):
     return make_env
 
 def main():
-    envs = gym.vector.AsyncVectorEnv([make_dreadmill_environment(i) for i in range(NUM_ENVS)])
+    envs = gym.vector.AsyncVectorEnv([make_treadmill_environment(i) for i in range(NUM_ENVS)])
 
     agent = NaiveAgent(
         n_envs=NUM_ENVS,

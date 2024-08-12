@@ -2,7 +2,7 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-class DreadmillSession(gym.Env):
+class TreadmillSession(gym.Env):
 
     def __init__(
         self,

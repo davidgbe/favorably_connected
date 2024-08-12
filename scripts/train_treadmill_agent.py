@@ -9,7 +9,7 @@ import torch
 import os
 import gymnasium as gym
 from tqdm import tqdm
-from environments.dreadmill_session import DreadmillSession
+from environments.treadmill_session import TreadmillSession
 from environments.components.patch import Patch
 from agents.networks.a2c_rnn import A2CRNN
 from agents.a2c_recurrent_agent import A2CRecurrentAgent
@@ -48,13 +48,13 @@ LEARNING_RATE = 0.0018679247001861746
  # final value:  0.07893333333333333
 
 # TRAINING PARAMS
-NUM_ENVS=12
+NUM_ENVS = 12
 N_UPDATES = 20000
 N_STEPS_PER_UPDATE = 200
 
 # OTHER PARMS
 DEVICE = 'cuda'
-OUTPUT_SAVE_RATE = 20
+OUTPUT_SAVE_RATE = 200
 OUTPUT_BASE_DIR = './data/rl_agent_outputs'
 
 # PARSE ARGUMENTS
@@ -63,7 +63,7 @@ parser.add_argument('--exp_title', metavar='et', type=str)
 args = parser.parse_args()
 
 
-def make_dreadmill_environment(env_idx):
+def make_treadmill_environment(env_idx):
 
     def make_env():
         np.random.seed(env_idx)
@@ -86,7 +86,7 @@ def make_dreadmill_environment(env_idx):
 
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
-        sesh = DreadmillSession(
+        sesh = TreadmillSession(
             patches,
             transition_mat,
             10,
@@ -130,7 +130,7 @@ def objective(trial):
         learning_rate=learning_rate, # changed for Optuna
     )
 
-    envs = gym.vector.AsyncVectorEnv([make_dreadmill_environment(i) for i in range(NUM_ENVS)])
+    envs = gym.vector.AsyncVectorEnv([make_treadmill_environment(i) for i in range(NUM_ENVS)])
 
     total_losses = np.empty((N_UPDATES))
     actor_losses = np.empty((N_UPDATES))

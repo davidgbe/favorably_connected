@@ -1,5 +1,5 @@
 import numpy as np
-from environments.dreadmill_session import DreadmillSession
+from environments.treadmill_session import TreadmillSession
 from environments.components.patch import Patch
 
 DWELL_TIME_FOR_REWARD = 4
@@ -19,7 +19,7 @@ if __name__ == '__main__':
         [1, 0, 0],
     ])
 
-    sesh = DreadmillSession(
+    sesh = TreadmillSession(
         patches,
         transition_mat,
         10,
