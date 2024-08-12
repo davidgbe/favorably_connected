@@ -1,3 +1,9 @@
+if __name__ == '__main__':
+    import sys
+    from pathlib import Path
+    curr_file_path = Path(__file__)
+    sys.path.append(str(curr_file_path.parent.parent))
+
 import numpy as np
 import torch
 import os
@@ -7,8 +13,13 @@ from environments.dreadmill_session import DreadmillSession
 from environments.components.patch import Patch
 from agents.networks.a2c_rnn import A2CRNN
 from agents.a2c_recurrent_agent import A2CRecurrentAgent
-from aux_funcs import zero_pad
+from aux_funcs import zero_pad, make_path_if_not_exists
 import optuna
+from datetime import datetime
+import argparse
+import multiprocessing as mp
+
+
 
 # ENVIRONEMENT PARAMS
 PATCH_TYPES_PER_ENV = 3
@@ -28,10 +39,13 @@ REWARD_PROB_PREFACTOR = 0.8
 
 # AGENT PARAMS
 HIDDEN_SIZE = 32
-CRITIC_WEIGHT = 0.0699
-ENTROPY_WEIGHT = 0.0198
-GAMMA = 0.513
-LEARNING_RATE = 0.00074
+CRITIC_WEIGHT = 0.008462461633690228
+ENTROPY_WEIGHT = 9.105961307700953e-05
+GAMMA = 0.776958910455669
+LEARNING_RATE = 0.0018679247001861746
+
+ # {'gamma': 0.7769589104556699, 'learning_rate': 0.0018679247001861746, 'critic_weight': 0.008462461633690228, 'entropy_weight': 9.105961307700953e-05}
+ # final value:  0.07893333333333333
 
 # TRAINING PARAMS
 NUM_ENVS=12
@@ -40,8 +54,13 @@ N_STEPS_PER_UPDATE = 200
 
 # OTHER PARMS
 DEVICE = 'cuda'
-OUTPUT_SAVE_RATE = 200
-OUTPUT_DIR = './data/rl_agent_outputs'
+OUTPUT_SAVE_RATE = 20
+OUTPUT_BASE_DIR = './data/rl_agent_outputs'
+
+# PARSE ARGUMENTS
+parser = argparse.ArgumentParser()
+parser.add_argument('--exp_title', metavar='et', type=str)
+args = parser.parse_args()
 
 
 def make_dreadmill_environment(env_idx):
@@ -158,7 +177,7 @@ def objective(trial):
             if sample_phase % OUTPUT_SAVE_RATE == 0 and sample_phase > 0:
                 save_num = int(sample_phase / OUTPUT_SAVE_RATE)
                 padded_save_num = zero_pad(str(save_num), 5)
-                np.save(os.path.join(OUTPUT_DIR, f'mean_rewards_per_update_{padded_save_num}.npy'), avg_rewards_per_update[:, sample_phase - OUTPUT_SAVE_RATE:sample_phase])
+                np.save(os.path.join(output_dir, f'mean_rewards_per_update_{padded_save_num}.npy'), avg_rewards_per_update[:, sample_phase - OUTPUT_SAVE_RATE:sample_phase])
     
     final_value = avg_rewards_per_update[:, -1 * steps_before_prune:].mean()
     print('final_reward_total', final_value)
@@ -170,15 +189,19 @@ def objective(trial):
     return final_value
 
 if __name__ == "__main__":
-    study = optuna.create_study(
-        direction='maximize',
-        pruner=optuna.pruners.MedianPruner(
-            n_startup_trials=5,
-            n_warmup_steps=100,
-            interval_steps=10,
-        ),
-    )
-    study.optimize(objective, n_trials=100)
-    print(study.best_params)
+    time_stamp = str(datetime.now()).replace(' ', '_').replace(':', '_').replace('.', '_')
+    output_dir = os.path.join(OUTPUT_BASE_DIR, '_'.join([args.exp_title, time_stamp]))
+    make_path_if_not_exists(output_dir)
+    
+    # study = optuna.create_study(
+    #     direction='maximize',
+    #     pruner=optuna.pruners.MedianPruner(
+    #         n_startup_trials=5,
+    #         n_warmup_steps=100,
+    #         interval_steps=10,
+    #     ),
+    # )
+    # study.optimize(objective, n_trials=100)
+    # print(study.best_params)
 
-    # print(objective(None))
+    print(objective(None))

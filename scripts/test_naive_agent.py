@@ -31,7 +31,7 @@ N_STEPS_PER_UPDATE = 200
 # OTHER PARMS
 DEVICE = 'cuda'
 OUTPUT_SAVE_RATE = 200
-OUTPUT_DIR = './data/naive_agent_outputs'
+OUTPUT_DIR = '../data/naive_agent_outputs'
 
 
 def make_dreadmill_environment(env_idx):
