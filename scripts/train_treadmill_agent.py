@@ -11,6 +11,7 @@ import gymnasium as gym
 from tqdm import tqdm
 from environments.treadmill_session import TreadmillSession
 from environments.components.patch import Patch
+from environments.curriculum import Curriculum
 from agents.networks.a2c_rnn import A2CRNN
 from agents.a2c_recurrent_agent import A2CRecurrentAgent
 from aux_funcs import zero_pad, make_path_if_not_exists
@@ -63,7 +64,8 @@ parser.add_argument('--exp_title', metavar='et', type=str)
 args = parser.parse_args()
 
 
-def make_treadmill_environment(env_idx):
+
+def make_deterministic_treadmill_environment(env_idx):
 
     def make_env():
         np.random.seed(env_idx)
@@ -92,12 +94,52 @@ def make_treadmill_environment(env_idx):
             10,
             DWELL_TIME_FOR_REWARD,
             SPATIAL_BUFFER_FOR_VISUAL_CUES,
+            obs_size=PATCH_TYPES_PER_ENV + 2,
             verbosity=False,
         )
 
         return sesh
 
     return make_env
+
+
+def make_stochastic_treadmill_environment(env_idx):
+
+    def make_env():
+        np.random.seed(env_idx)
+        
+        n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
+        reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
+        interreward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_INTERREWARD_SITE_LEN - MIN_INTERREWARD_SITE_LEN) + MIN_INTERREWARD_SITE_LEN
+        decay_consts_for_reward_funcs = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_DECAY_CONST - MIN_REWARD_DECAY_CONST) + MIN_REWARD_DECAY_CONST
+
+        patches = []
+        for i in range(PATCH_TYPES_PER_ENV):
+            def reward_func(site_idx):
+                c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_consts_for_reward_funcs[i])
+                if np.random.rand() < c:
+                    return 1
+                else:
+                    return 0
+            patches.append(Patch(n_reward_sites_for_patches[i], reward_site_len_for_patches[i], interreward_site_len_for_patches[i], reward_func, i))
+
+        transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
+
+        sesh = TreadmillSession(
+            patches,
+            transition_mat,
+            10,
+            DWELL_TIME_FOR_REWARD,
+            SPATIAL_BUFFER_FOR_VISUAL_CUES,
+            obs_size=PATCH_TYPES_PER_ENV + 2,
+            verbosity=False,
+        )
+
+        return sesh
+
+    return make_env
+
+
 
 def objective(trial):
 
@@ -130,7 +172,15 @@ def objective(trial):
         learning_rate=learning_rate, # changed for Optuna
     )
 
-    envs = gym.vector.AsyncVectorEnv([make_treadmill_environment(i) for i in range(NUM_ENVS)])
+    curricum = Curriculum(
+        curriculum_step_starts=[0, 5000],
+        curriculum_step_env_funcs=[
+            make_deterministic_treadmill_environment,
+            make_stochastic_treadmill_environment,
+        ],
+    )
+
+    env_seeds = np.arange(NUM_ENVS)
 
     total_losses = np.empty((N_UPDATES))
     actor_losses = np.empty((N_UPDATES))
@@ -141,6 +191,7 @@ def objective(trial):
     for sample_phase in tqdm(range(N_UPDATES)):
         # at the start of training reset all envs to get an initial state
         # play n steps in our parallel environments to collect data
+        envs = curricum.get_envs_for_step(env_seeds)
         obs, info = envs.reset()
 
         total_rewards = np.empty((NUM_ENVS, N_STEPS_PER_UPDATE))

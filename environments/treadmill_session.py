@@ -11,6 +11,7 @@ class TreadmillSession(gym.Env):
         interpatch_len,
         dwell_time_for_reward,
         spatial_buffer_for_visual_cues,
+        obs_size,
         verbosity=True,
         first_patch_start=None,
     ):
@@ -22,7 +23,12 @@ class TreadmillSession(gym.Env):
         self.set_verbosity(verbosity)
         self.step_vals = np.array([0, 1])
         self.start_new_session(first_patch_start)
-        self.observation_space = spaces.MultiDiscrete(np.ones(len(patches) + 2, dtype=int))
+        if type(obs_size) is not int:
+            raise ValueError("'obs_size' must be an integer")
+        if obs_size < len(patches):
+            raise ValueError("'obs_size' must be at least equal to the number of patches")
+        self.obs_size = obs_size
+        self.observation_space = spaces.MultiDiscrete(np.ones(obs_size, dtype=int))
         self.action_space = spaces.Discrete(len(self.step_vals))
 
 
@@ -168,7 +174,7 @@ class TreadmillSession(gym.Env):
         # observations entirely determined by location
         # there are 2 visual cues plus odor cues equal to the number of patchs
 
-        observations = np.zeros((2 + len(self.patches,)), dtype=int)
+        observations = np.zeros((self.obs_size), dtype=int)
 
         # [entering_patch_visual_cue, leaving_patch_visual_cue, odor_cue_1, odor_cue_2, ...]
         # if within spatial_buffer_for_visual_cues of start of patch, give `entering_patch_visual_cue`
