@@ -31,10 +31,9 @@ DWELL_TIME_FOR_REWARD = 6
 SPATIAL_BUFFER_FOR_VISUAL_CUES = 1.5
 MAX_REWARD_SITE_LEN = 3
 MIN_REWARD_SITE_LEN = 3
-MAX_N_REWARD_SITES_PER_PATCH = 6
-MIN_N_REWARD_SITES_PER_PATCH = 6
-MAX_INTERREWARD_SITE_LEN = 3
-MIN_INTERREWARD_SITE_LEN = 1
+MAX_N_REWARD_SITES_PER_PATCH = 4
+MIN_N_REWARD_SITES_PER_PATCH = 4
+INTERREWARD_SITE_LEN_MEAN = 3
 MAX_REWARD_DECAY_CONST = 5
 MIN_REWARD_DECAY_CONST = 0.1
 REWARD_PROB_PREFACTOR = 0.8
@@ -42,12 +41,13 @@ INTERPATCH_LEN = 2
 
 # AGENT PARAMS
 HIDDEN_SIZE = 32
-CRITIC_WEIGHT = 2.1044468498087168e-0
-ENTROPY_WEIGHT = 5.451018413796079e-05
-GAMMA = 0.9242275314064826
-LEARNING_RATE = 0.0049672293980019665
+CRITIC_WEIGHT = 3.4252735201523475e-06
+ENTROPY_WEIGHT = 0.00010769390908856783
+GAMMA = 0.9516048030771357
+LEARNING_RATE = 0.002369189001127684
 
-# {'gamma': 0.9242275314064826, 'learning_rate': 0.0049672293980019665, 'critic_weight': 2.1044468498087168e-05, 'entropy_weight': 5.451018413796079e-05}
+# {'gamma': 0.9516048030771357, 'learning_rate': 0.002369189001127684, 'critic_weight': 3.4252735201523475e-06, 'entropy_weight': 0.00010769390908856783}
+
 
 # TRAINING PARAMS
 NUM_ENVS = 12
@@ -73,8 +73,9 @@ def make_deterministic_treadmill_environment(env_idx):
         
         n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
         reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
-        interreward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_INTERREWARD_SITE_LEN - MIN_INTERREWARD_SITE_LEN) + MIN_INTERREWARD_SITE_LEN
         decay_consts_for_reward_funcs = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_DECAY_CONST - MIN_REWARD_DECAY_CONST) + MIN_REWARD_DECAY_CONST
+
+        print(decay_consts_for_reward_funcs)
 
         patches = []
         for i in range(PATCH_TYPES_PER_ENV):
@@ -85,7 +86,16 @@ def make_deterministic_treadmill_environment(env_idx):
                 # else:
                 #     return 0
                 return 1
-            patches.append(Patch(n_reward_sites_for_patches[i], reward_site_len_for_patches[i], interreward_site_len_for_patches[i], reward_func, i))
+            patches.append(
+                Patch(
+                    n_reward_sites_for_patches[i],
+                    reward_site_len_for_patches[i],
+                    INTERREWARD_SITE_LEN_MEAN,
+                    reward_func,
+                    i,
+                    reward_func_param=0
+                )
+            )
 
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
@@ -111,8 +121,9 @@ def make_stochastic_treadmill_environment(env_idx):
         
         n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
         reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
-        interreward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_INTERREWARD_SITE_LEN - MIN_INTERREWARD_SITE_LEN) + MIN_INTERREWARD_SITE_LEN
         decay_consts_for_reward_funcs = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_DECAY_CONST - MIN_REWARD_DECAY_CONST) + MIN_REWARD_DECAY_CONST
+
+        print(decay_consts_for_reward_funcs)
 
         patches = []
         for i in range(PATCH_TYPES_PER_ENV):
@@ -122,7 +133,16 @@ def make_stochastic_treadmill_environment(env_idx):
                     return 1
                 else:
                     return 0
-            patches.append(Patch(n_reward_sites_for_patches[i], reward_site_len_for_patches[i], interreward_site_len_for_patches[i], reward_func, i))
+            patches.append(
+                Patch(
+                    n_reward_sites_for_patches[i],
+                    reward_site_len_for_patches[i],
+                    INTERREWARD_SITE_LEN_MEAN,
+                    reward_func,
+                    i,
+                    reward_func_param=decay_consts_for_reward_funcs[i],
+                )
+            )
 
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
@@ -174,7 +194,7 @@ def objective(trial):
     )
 
     curricum = Curriculum(
-        curriculum_step_starts=[0, 2500],
+        curriculum_step_starts=[0, 400],
         curriculum_step_env_funcs=[
             make_deterministic_treadmill_environment,
             make_stochastic_treadmill_environment,
@@ -252,15 +272,15 @@ if __name__ == "__main__":
     make_path_if_not_exists(reward_rates_output_dir)
     make_path_if_not_exists(info_output_dir)
     
-    study = optuna.create_study(
-        direction='maximize',
-        pruner=optuna.pruners.MedianPruner(
-            n_startup_trials=5,
-            n_warmup_steps=2700,
-            interval_steps=10,
-        ),
-    )
-    study.optimize(objective, n_trials=100)
-    print(study.best_params)
+    # study = optuna.create_study(
+    #     direction='maximize',
+    #     pruner=optuna.pruners.MedianPruner(
+    #         n_startup_trials=5,
+    #         n_warmup_steps=2700,
+    #         interval_steps=10,
+    #     ),
+    # )
+    # study.optimize(objective, n_trials=100)
+    # print(study.best_params)
 
-    # print(objective(None))
+    print(objective(None))

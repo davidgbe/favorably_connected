@@ -44,32 +44,38 @@ class TreadmillSession(gym.Env):
 
     def step(self, action):
         forward_movement_amount = self.step_vals[action]
+        info = self.get_info(forward_movement_amount)
         reward = self.move_forward(forward_movement_amount)
         obs = self.get_observations()
 
-        return obs, reward, False, False, self.get_info(forward_movement_amount, reward, obs)
+        info['reward'] = reward
+
+        return obs, reward, False, False, info
 
     # end gymnasium API
 
 
-    def get_info(self, action, reward, obs):
+    def get_info(self, action):
         return {
             'action': action,
-            'reward': reward,
-            'obs': obs,
+            'obs': self.get_observations(),
             'current_patch_num': self.current_patch_num,
             'current_position': self.current_position,
             'current_patch_bounds': self.current_patch_bounds,
             'reward_bounds': self.reward_bounds,
+            'agent_in_patch': self.is_agent_in_current_patch(),
+            'reward_site_idx': self.get_reward_site_idx_of_current_pos(),
+            'current_reward_site_attempted': self.current_reward_site_attempted,
+            'patch_reward_param': self.current_patch.reward_func_param,
         }
 
 
     def start_new_session(self, first_patch_start=None):
-        self.current_patch_num = 0 # np.random.randint(0, len(self.patches))
+        self.current_patch_num = np.random.randint(0, len(self.patches))
         self.current_position = 0
         self.wprint(f'New session! Position is {self.current_position}')
         if first_patch_start is None:
-            first_patch_start = np.random.randint(0, 10)
+            first_patch_start = np.random.randint(0, 3)
         self.set_current_patch(self.current_patch_num, patch_start=first_patch_start)
         self.total_reward = 0
         self.reward_site_dwell_time = 0
@@ -168,8 +174,7 @@ class TreadmillSession(gym.Env):
         self.current_patch = self.patches[self.current_patch_num]
         if patch_start is None:
             patch_start = self.current_patch_bounds[1] + self.interpatch_len
-        self.current_patch_bounds = self.current_patch.get_patch_bounds(patch_start)
-        self.reward_bounds = self.current_patch.get_reward_bounds(patch_start)
+        self.current_patch_bounds, self.reward_bounds  = self.current_patch.get_bounds(patch_start)
 
         self.wprint(f'New patch created!')
         self.wprint(f'Patch bounds are [{self.current_patch_bounds[0]}, {self.current_patch_bounds[1]}]')
