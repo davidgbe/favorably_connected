@@ -12,12 +12,14 @@ from tqdm import tqdm
 from environments.treadmill_session import TreadmillSession
 from environments.components.patch import Patch
 from environments.curriculum import Curriculum
-from agents.naive_agent import NaiveAgent
+from agents.networks.a2c_rnn import A2CRNN
+from agents.a2c_recurrent_agent import A2CRecurrentAgent
 from aux_funcs import zero_pad, make_path_if_not_exists
 import optuna
 from datetime import datetime
 import argparse
 import multiprocessing as mp
+import pickle
 
 
 
@@ -38,6 +40,16 @@ MIN_REWARD_DECAY_CONST = 0.1
 REWARD_PROB_PREFACTOR = 0.8
 INTERPATCH_LEN = 2
 
+# AGENT PARAMS
+HIDDEN_SIZE = 32
+CRITIC_WEIGHT = 0.008462461633690228
+ENTROPY_WEIGHT = 9.105961307700953e-05
+GAMMA = 0.776958910455669
+LEARNING_RATE = 0.0018679247001861746
+
+ # {'gamma': 0.7769589104556699, 'learning_rate': 0.0018679247001861746, 'critic_weight': 0.008462461633690228, 'entropy_weight': 9.105961307700953e-05}
+ # final value:  0.07893333333333333
+
 # TRAINING PARAMS
 NUM_ENVS = 12
 N_UPDATES = 20000
@@ -46,7 +58,7 @@ N_STEPS_PER_UPDATE = 200
 # OTHER PARMS
 DEVICE = 'cuda'
 OUTPUT_SAVE_RATE = 200
-OUTPUT_BASE_DIR = './data/naive_agent_outputs'
+OUTPUT_BASE_DIR = './data/rl_agent_outputs'
 
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
@@ -68,11 +80,6 @@ def make_deterministic_treadmill_environment(env_idx):
         patches = []
         for i in range(PATCH_TYPES_PER_ENV):
             def reward_func(site_idx):
-                # c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_consts_for_reward_funcs[i])
-                # if np.random.rand() < c:
-                #     return 1
-                # else:
-                #     return 0
                 return 1
             patches.append(Patch(n_reward_sites_for_patches[i], reward_site_len_for_patches[i], interreward_site_len_for_patches[i], reward_func, i))
 
@@ -133,10 +140,33 @@ def make_stochastic_treadmill_environment(env_idx):
 
 def objective(trial):
 
-    agent = NaiveAgent(
+    if trial is not None:
+        gamma = trial.suggest_float('gamma', 0.0, 1.0)
+        learning_rate = trial.suggest_float('learning_rate', 1e-6, 0.01, log=True)
+        critic_weight = trial.suggest_float('critic_weight', 1e-6, 0.1, log=True)
+        entropy_weight = trial.suggest_float('entropy_weight', 1e-6, 0.1, log=True)
+    else:
+        gamma = GAMMA
+        learning_rate = LEARNING_RATE
+        critic_weight = CRITIC_WEIGHT
+        entropy_weight = ENTROPY_WEIGHT
+
+    network = A2CRNN(
+        input_size=OBS_SIZE + ACTION_SIZE + 1,
+        action_size=ACTION_SIZE,
+        hidden_size=HIDDEN_SIZE,
+        device=DEVICE,
+    )
+
+    agent = A2CRecurrentAgent(
+        network,
+        action_space_dims=ACTION_SIZE,
         n_envs=NUM_ENVS,
-        wait_time_for_reward=DWELL_TIME_FOR_REWARD,
-        odor_cues_indicies=(2, 2 + PATCH_TYPES_PER_ENV),
+        device=DEVICE,
+        critic_weight=critic_weight, # changed for Optuna
+        entropy_weight=entropy_weight, # changed for Optuna
+        gamma=gamma, # changed for Optuna
+        learning_rate=learning_rate, # changed for Optuna
     )
 
     curricum = Curriculum(
@@ -149,6 +179,10 @@ def objective(trial):
 
     env_seeds = np.arange(NUM_ENVS)
 
+    total_losses = np.empty((N_UPDATES))
+    actor_losses = np.empty((N_UPDATES))
+    critic_losses = np.empty((N_UPDATES))
+    entropy_losses = np.empty((N_UPDATES))
     avg_rewards_per_update = np.empty((NUM_ENVS, N_UPDATES))
 
     for sample_phase in tqdm(range(N_UPDATES)):
@@ -156,15 +190,25 @@ def objective(trial):
         # play n steps in our parallel environments to collect data
         envs = curricum.get_envs_for_step(env_seeds)
         obs, info = envs.reset()
+        all_info = []
 
         total_rewards = np.empty((NUM_ENVS, N_STEPS_PER_UPDATE))
         for step in range(N_STEPS_PER_UPDATE):
             action = agent.sample_action(obs)
+            action = action.cpu().numpy()
             obs, reward, terminated, truncated, info = envs.step(action)
             agent.append_reward(reward.astype('float32'))
             total_rewards[:, step] = reward
+            all_info.append(info)
+
         avg_rewards_per_update[:, sample_phase] = np.mean(total_rewards, axis=1)
-       
+        total_loss, actor_loss, critic_loss, entropy_loss = agent.get_losses()
+        agent.update(total_loss)
+        total_losses[sample_phase] = total_loss.detach().cpu().numpy()
+        actor_losses[sample_phase] = actor_loss.detach().cpu().numpy()
+        critic_losses[sample_phase] = critic_loss.detach().cpu().numpy()
+        entropy_losses[sample_phase] = entropy_loss.detach().cpu().numpy()
+
         steps_before_prune = 100
 
         if trial is not None and sample_phase > 0:
@@ -178,10 +222,14 @@ def objective(trial):
             if trial.should_prune():
                 raise optuna.TrialPruned()
         else:
+            # print('actor', actor_losses[sample_phase])
+            # print('critic', CRITIC_WEIGHT * critic_losses[sample_phase])
+            # print('entropy', ENTROPY_WEIGHT * entropy_losses[sample_phase])
             if sample_phase % OUTPUT_SAVE_RATE == 0 and sample_phase > 0:
                 save_num = int(sample_phase / OUTPUT_SAVE_RATE)
                 padded_save_num = zero_pad(str(save_num), 5)
-                np.save(os.path.join(output_dir, f'mean_rewards_per_update_{padded_save_num}.npy'), avg_rewards_per_update[:, sample_phase - OUTPUT_SAVE_RATE:sample_phase])
+                np.save(os.path.join(reward_rates_output_dir, f'{padded_save_num}.npy'), avg_rewards_per_update[:, sample_phase - OUTPUT_SAVE_RATE:sample_phase])
+                pickle.dump(all_info, open(os.path.join(info_output_dir, f'{padded_save_num}.pkl'), 'wb'))
     
     final_value = avg_rewards_per_update[:, -1 * steps_before_prune:].mean()
     print('final_reward_total', final_value)
@@ -195,7 +243,20 @@ def objective(trial):
 if __name__ == "__main__":
     time_stamp = str(datetime.now()).replace(' ', '_').replace(':', '_').replace('.', '_')
     output_dir = os.path.join(OUTPUT_BASE_DIR, '_'.join([args.exp_title, time_stamp]))
-    make_path_if_not_exists(output_dir)
+    reward_rates_output_dir = os.path.join(output_dir, 'reward_rates')
+    info_output_dir = os.path.join(output_dir, 'state')
+    make_path_if_not_exists(reward_rates_output_dir)
+    make_path_if_not_exists(info_output_dir)
+    
+    study = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(
+            n_startup_trials=5,
+            n_warmup_steps=100,
+            interval_steps=10,
+        ),
+    )
+    study.optimize(objective, n_trials=100)
+    print(study.best_params)
 
-    print(objective(None))
-
+    # print(objective(None))

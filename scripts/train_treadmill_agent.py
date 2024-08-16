@@ -19,6 +19,7 @@ import optuna
 from datetime import datetime
 import argparse
 import multiprocessing as mp
+import pickle
 
 
 
@@ -28,25 +29,25 @@ OBS_SIZE = PATCH_TYPES_PER_ENV + 2
 ACTION_SIZE = 2
 DWELL_TIME_FOR_REWARD = 6
 SPATIAL_BUFFER_FOR_VISUAL_CUES = 1.5
-MAX_REWARD_SITE_LEN = 5
-MIN_REWARD_SITE_LEN = 2
-MAX_N_REWARD_SITES_PER_PATCH = 4
-MIN_N_REWARD_SITES_PER_PATCH = 2
+MAX_REWARD_SITE_LEN = 3
+MIN_REWARD_SITE_LEN = 3
+MAX_N_REWARD_SITES_PER_PATCH = 6
+MIN_N_REWARD_SITES_PER_PATCH = 6
 MAX_INTERREWARD_SITE_LEN = 3
 MIN_INTERREWARD_SITE_LEN = 1
-MAX_REWARD_DECAY_CONST = 10
+MAX_REWARD_DECAY_CONST = 5
 MIN_REWARD_DECAY_CONST = 0.1
 REWARD_PROB_PREFACTOR = 0.8
+INTERPATCH_LEN = 2
 
 # AGENT PARAMS
 HIDDEN_SIZE = 32
-CRITIC_WEIGHT = 0.008462461633690228
-ENTROPY_WEIGHT = 9.105961307700953e-05
-GAMMA = 0.776958910455669
-LEARNING_RATE = 0.0018679247001861746
+CRITIC_WEIGHT = 2.1044468498087168e-0
+ENTROPY_WEIGHT = 5.451018413796079e-05
+GAMMA = 0.9242275314064826
+LEARNING_RATE = 0.0049672293980019665
 
- # {'gamma': 0.7769589104556699, 'learning_rate': 0.0018679247001861746, 'critic_weight': 0.008462461633690228, 'entropy_weight': 9.105961307700953e-05}
- # final value:  0.07893333333333333
+# {'gamma': 0.9242275314064826, 'learning_rate': 0.0049672293980019665, 'critic_weight': 2.1044468498087168e-05, 'entropy_weight': 5.451018413796079e-05}
 
 # TRAINING PARAMS
 NUM_ENVS = 12
@@ -91,7 +92,7 @@ def make_deterministic_treadmill_environment(env_idx):
         sesh = TreadmillSession(
             patches,
             transition_mat,
-            10,
+            INTERPATCH_LEN,
             DWELL_TIME_FOR_REWARD,
             SPATIAL_BUFFER_FOR_VISUAL_CUES,
             obs_size=PATCH_TYPES_PER_ENV + 2,
@@ -128,7 +129,7 @@ def make_stochastic_treadmill_environment(env_idx):
         sesh = TreadmillSession(
             patches,
             transition_mat,
-            10,
+            INTERPATCH_LEN,
             DWELL_TIME_FOR_REWARD,
             SPATIAL_BUFFER_FOR_VISUAL_CUES,
             obs_size=PATCH_TYPES_PER_ENV + 2,
@@ -144,10 +145,10 @@ def make_stochastic_treadmill_environment(env_idx):
 def objective(trial):
 
     if trial is not None:
-        gamma = trial.suggest_float('gamma', 0.0, 1.0)
-        learning_rate = trial.suggest_float('learning_rate', 1e-6, 0.01, log=True)
-        critic_weight = trial.suggest_float('critic_weight', 1e-6, 0.1, log=True)
-        entropy_weight = trial.suggest_float('entropy_weight', 1e-6, 0.1, log=True)
+        gamma = trial.suggest_float('gamma', 0.85, 1.0)
+        learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-2, log=True)
+        critic_weight = trial.suggest_float('critic_weight', 1e-6, 1, log=True)
+        entropy_weight = trial.suggest_float('entropy_weight', 1e-6, 1e-2, log=True)
     else:
         gamma = GAMMA
         learning_rate = LEARNING_RATE
@@ -173,7 +174,7 @@ def objective(trial):
     )
 
     curricum = Curriculum(
-        curriculum_step_starts=[0, 5000],
+        curriculum_step_starts=[0, 2500],
         curriculum_step_env_funcs=[
             make_deterministic_treadmill_environment,
             make_stochastic_treadmill_environment,
@@ -193,6 +194,7 @@ def objective(trial):
         # play n steps in our parallel environments to collect data
         envs = curricum.get_envs_for_step(env_seeds)
         obs, info = envs.reset()
+        all_info = []
 
         total_rewards = np.empty((NUM_ENVS, N_STEPS_PER_UPDATE))
         for step in range(N_STEPS_PER_UPDATE):
@@ -201,6 +203,8 @@ def objective(trial):
             obs, reward, terminated, truncated, info = envs.step(action)
             agent.append_reward(reward.astype('float32'))
             total_rewards[:, step] = reward
+            all_info.append(info)
+
         avg_rewards_per_update[:, sample_phase] = np.mean(total_rewards, axis=1)
         total_loss, actor_loss, critic_loss, entropy_loss = agent.get_losses()
         agent.update(total_loss)
@@ -228,7 +232,8 @@ def objective(trial):
             if sample_phase % OUTPUT_SAVE_RATE == 0 and sample_phase > 0:
                 save_num = int(sample_phase / OUTPUT_SAVE_RATE)
                 padded_save_num = zero_pad(str(save_num), 5)
-                np.save(os.path.join(output_dir, f'mean_rewards_per_update_{padded_save_num}.npy'), avg_rewards_per_update[:, sample_phase - OUTPUT_SAVE_RATE:sample_phase])
+                np.save(os.path.join(reward_rates_output_dir, f'{padded_save_num}.npy'), avg_rewards_per_update[:, sample_phase - OUTPUT_SAVE_RATE:sample_phase])
+                pickle.dump(all_info, open(os.path.join(info_output_dir, f'{padded_save_num}.pkl'), 'wb'))
     
     final_value = avg_rewards_per_update[:, -1 * steps_before_prune:].mean()
     print('final_reward_total', final_value)
@@ -242,17 +247,20 @@ def objective(trial):
 if __name__ == "__main__":
     time_stamp = str(datetime.now()).replace(' ', '_').replace(':', '_').replace('.', '_')
     output_dir = os.path.join(OUTPUT_BASE_DIR, '_'.join([args.exp_title, time_stamp]))
-    make_path_if_not_exists(output_dir)
+    reward_rates_output_dir = os.path.join(output_dir, 'reward_rates')
+    info_output_dir = os.path.join(output_dir, 'state')
+    make_path_if_not_exists(reward_rates_output_dir)
+    make_path_if_not_exists(info_output_dir)
     
-    # study = optuna.create_study(
-    #     direction='maximize',
-    #     pruner=optuna.pruners.MedianPruner(
-    #         n_startup_trials=5,
-    #         n_warmup_steps=100,
-    #         interval_steps=10,
-    #     ),
-    # )
-    # study.optimize(objective, n_trials=100)
-    # print(study.best_params)
+    study = optuna.create_study(
+        direction='maximize',
+        pruner=optuna.pruners.MedianPruner(
+            n_startup_trials=5,
+            n_warmup_steps=2700,
+            interval_steps=10,
+        ),
+    )
+    study.optimize(objective, n_trials=100)
+    print(study.best_params)
 
-    print(objective(None))
+    # print(objective(None))

@@ -39,7 +39,7 @@ class TreadmillSession(gym.Env):
         super().reset(seed=seed)
         self.start_new_session()
 
-        return self.get_observations(), self.get_info()
+        return self.get_observations(), {}
 
 
     def step(self, action):
@@ -47,13 +47,21 @@ class TreadmillSession(gym.Env):
         reward = self.move_forward(forward_movement_amount)
         obs = self.get_observations()
 
-        return obs, reward, False, False, self.get_info()
+        return obs, reward, False, False, self.get_info(forward_movement_amount, reward, obs)
 
     # end gymnasium API
 
 
-    def get_info(self):
-        return {}
+    def get_info(self, action, reward, obs):
+        return {
+            'action': action,
+            'reward': reward,
+            'obs': obs,
+            'current_patch_num': self.current_patch_num,
+            'current_position': self.current_position,
+            'current_patch_bounds': self.current_patch_bounds,
+            'reward_bounds': self.reward_bounds,
+        }
 
 
     def start_new_session(self, first_patch_start=None):
