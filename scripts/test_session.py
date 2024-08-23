@@ -1,3 +1,9 @@
+if __name__ == '__main__':
+    import sys
+    from pathlib import Path
+    curr_file_path = Path(__file__)
+    sys.path.append(str(curr_file_path.parent.parent))
+
 import numpy as np
 from environments.treadmill_session import TreadmillSession
 from environments.components.patch import Patch
@@ -25,6 +31,7 @@ if __name__ == '__main__':
         10,
         DWELL_TIME_FOR_REWARD,
         SPATIAL_BUFFER_FOR_VISUAL_CUES,
+        obs_size=len(patches) + 2,
         verbosity=True,
         first_patch_start=5,
     )
@@ -51,6 +58,9 @@ if __name__ == '__main__':
 
     if not (sesh.total_reward == 1 and sesh.current_position == 8 and sesh.reward_site_dwell_time == 4 and (sesh.get_observations() == np.array([0, 0, 1, 0, 0])).all()):
         raise ValueError('3')
+
+    if not (sesh.get_reward_site_idx_of_current_pos() == 0):
+        raise ValueError(f'Wrong reward_site_idx: {sesh.get_reward_site_idx_of_current_pos()}')
 
     for k in range(3):
         sesh.move_forward(1)

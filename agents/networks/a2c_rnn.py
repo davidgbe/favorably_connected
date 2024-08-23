@@ -39,7 +39,14 @@ class A2CRNN(nn.Module):
         self.hidden_states = None
     
     def reset_state(self):
+        hidden_states = self.hidden_states.detach().cpu()
         self.hidden_states = None
+        return hidden_states
+
+    
+    def set_state(self, hidden_states):
+        self.hidden_states = hidden_states
+        self.hidden_states = self.hidden_states.to(self.device)
 
 
     def forward(self, inputs):

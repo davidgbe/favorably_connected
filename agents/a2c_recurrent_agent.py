@@ -53,7 +53,7 @@ class A2CRecurrentAgent:
             actions: Action indexes, with shape [n_envs, ] 
         """
         # ensures observations is a tensor
-        observations = torch.tensor(observations).to(self.device)
+        obs = torch.tensor(observations).to(self.device)
         # grabs past actions and rewards
         past_action_one_hot = self.get_last_action_one_hot()
         past_reward = self.get_last_reward()
@@ -61,7 +61,7 @@ class A2CRecurrentAgent:
         # input will be [n_envs, (obs_size + action_size + 2)]
         # the 2 is for reward and time
         inputs = torch.cat((
-            observations, past_action_one_hot, past_reward.unsqueeze(dim=1)
+            obs, past_action_one_hot, past_reward.unsqueeze(dim=1)
         ), dim=1).to(self.device)
 
         # run through the network
@@ -133,7 +133,7 @@ class A2CRecurrentAgent:
         values = torch.stack(self.values).to(self.device)
         entropies = torch.stack(self.entropies).to(self.device)
         # make this an object attribute since it's useful for debugging later
-        self.td_errs = torch.zeros((T, self.n_envs)).to(self.device)
+        td_errs = torch.zeros((T, self.n_envs)).to(self.device)
 
         # step through time, calculate td errors (generally advantages)
         # NOTE: This is implementing vanilla actor critic,
@@ -144,13 +144,13 @@ class A2CRecurrentAgent:
 
         for t in reversed(range(T-1)):
             rolling_rewards = self.gamma * rolling_rewards + rewards[t, :]
-            self.td_errs[t, :] = rolling_rewards - values[t, :]
+            td_errs[t, :] = rolling_rewards - values[t, :]
 
         # want to minimize TD error
-        critic_loss = self.td_errs.pow(2).mean()   
+        critic_loss = td_errs.pow(2).mean()   
 
         # A2C actor loss, derived from policy gradient theorem
-        actor_loss = -(self.td_errs.detach() * log_probs).mean()
+        actor_loss = -(td_errs.detach() * log_probs).mean()
 
         # want to ENCOURAGE high entropy, so define negative loss
         entropy_loss = -entropies.mean()
@@ -159,7 +159,7 @@ class A2CRecurrentAgent:
         return (total_loss, actor_loss, critic_loss, entropy_loss)
 
 
-    def update(self, total_loss=None):
+    def update(self, total_loss=None, retain_graph=False):
         """
         Updates network parameters via calculated total loss, calculates total 
         loss if it's not provided. 
@@ -169,17 +169,24 @@ class A2CRecurrentAgent:
         if total_loss is None:
             total_loss, _, _, _ = self.get_losses()
         self.optimizer.zero_grad()
-        total_loss.backward()
+        total_loss.backward(retain_graph=retain_graph)
         self.optimizer.step()
-        self.reset_state()
         
 
-    def reset_state(self):
+    def reset_state(self, reset_hidden=True):
         """
         Resets the network, as well as the agent's states. 
         """
-        self.net.reset_state()
+        hidden_states = None
+        if reset_hidden:
+            hidden_states = self.net.reset_state()
         self.log_probs = []
         self.rewards = []
         self.values = []
         self.entropies = []
+        return hidden_states
+
+
+    def set_state(self, hidden_states):
+        self.net.set_state(hidden_states)
+
