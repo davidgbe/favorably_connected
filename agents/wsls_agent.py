@@ -2,11 +2,11 @@ import numpy as np
 
 class WSLSAgent():
 
-    def __init__(self, n_envs, wait_time_for_reward, odor_cues_indicies, patch_cue_idx):
+    def __init__(self, n_envs, wait_time_for_reward, odor_cues_indices, patch_cue_idx):
         self.wait_time_for_reward = wait_time_for_reward
         self.rewards = []
-        self.odor_cues_start = odor_cues_indicies[0]
-        self.odor_cues_end = odor_cues_indicies[1]
+        self.odor_cues_start = odor_cues_indices[0]
+        self.odor_cues_end = odor_cues_indices[1]
         self.patch_cue_idx = patch_cue_idx
         self.stay_in_current_patch = np.zeros((n_envs), dtype=bool)
         self.last_observations = None
@@ -44,4 +44,4 @@ class WSLSAgent():
     def reset_state(self):
         self.rewards = []
         self.last_observations = None
-        self.dwell_time = np.zeros((n_envs))
+        self.dwell_time = np.zeros((self.n_envs))

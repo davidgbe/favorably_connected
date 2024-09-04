@@ -2,11 +2,11 @@ import numpy as np
 
 class NaiveAgent():
 
-    def __init__(self, n_envs, wait_time_for_reward, odor_cues_indicies):
+    def __init__(self, n_envs, wait_time_for_reward, odor_cues_indices):
         self.wait_time_for_reward = wait_time_for_reward
         self.rewards = []
-        self.odor_cues_start = odor_cues_indicies[0]
-        self.odor_cues_end = odor_cues_indicies[1]
+        self.odor_cues_start = odor_cues_indices[0]
+        self.odor_cues_end = odor_cues_indices[1]
         self.last_observations = None
         self.dwell_time = np.zeros((n_envs), dtype=int)
         self.n_envs = n_envs
@@ -39,4 +39,4 @@ class NaiveAgent():
     def reset_state(self):
         self.rewards = []
         self.last_observations = None
-        self.dwell_time = np.zeros((n_envs))
+        self.dwell_time = np.zeros((self.n_envs))

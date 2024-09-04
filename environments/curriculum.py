@@ -15,7 +15,7 @@ class Curriculum():
             self.current_envs = gym.vector.AsyncVectorEnv([self.curriculum_step_env_funcs[0](i) for i in env_seeds])
             self.step_count += 1
         elif self.step_count < len(self.curriculum_step_starts) and self.call_count == self.curriculum_step_starts[self.step_count]:
-            self.current_envs = gym.vector.AsyncVectorEnv([self.curriculum_step_env_funcs[self.step_count](i + self.step_count) for i in env_seeds])
+            self.current_envs = gym.vector.AsyncVectorEnv([self.curriculum_step_env_funcs[self.step_count](i) for i in env_seeds])
             if self.step_count < (len(self.curriculum_step_starts) - 1):
                 self.step_count += 1
         self.call_count += 1

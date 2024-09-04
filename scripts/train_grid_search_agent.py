@@ -5,15 +5,13 @@ if __name__ == '__main__':
     sys.path.append(str(curr_file_path.parent.parent))
 
 import numpy as np
-import torch
 import os
 import gymnasium as gym
 from tqdm import tqdm
 from environments.treadmill_session import TreadmillSession
 from environments.components.patch import Patch
 from environments.curriculum import Curriculum
-from agents.networks.a2c_rnn import A2CRNN
-from agents.a2c_recurrent_agent import A2CRecurrentAgent
+from agents.grid_search_agent import GridSearchAgent
 from aux_funcs import zero_pad, make_path_if_not_exists
 import optuna
 from datetime import datetime
@@ -38,21 +36,6 @@ MIN_REWARD_DECAY_CONST = 0.1
 REWARD_PROB_PREFACTOR = 0.8
 INTERPATCH_LEN = 6
 
-# AGENT PARAMS
-HIDDEN_SIZE = 128
-CRITIC_WEIGHT = 0.07846647668470078
-ENTROPY_WEIGHT = 1.0158892869509133e-06
-GAMMA = 0.9867118269299845
-LEARNING_RATE = 0.0006006712322528219
-
-'''
-{
-    'gamma': 0.9867118269299845,
-    'learning_rate': 0.0006006712322528219,
-    'critic_weight': 0.07846647668470078,
-    'entropy_weight': 1.0158892869509133e-06
-}
-'''
 
 # TRAINING PARAMS
 NUM_ENVS = 20
@@ -61,9 +44,8 @@ N_STEPS_PER_UPDATE = 200
 N_UPDATES_PER_RESET = 25
 
 # OTHER PARMS
-DEVICE = 'cuda'
 OUTPUT_SAVE_RATE = 200
-OUTPUT_BASE_DIR = './data/rl_agent_outputs'
+OUTPUT_BASE_DIR = './data/grid_search_agent_outputs'
 
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
@@ -72,20 +54,24 @@ args = parser.parse_args()
 
 
 
-def make_deterministic_treadmill_environment(env_idx):
+def make_expected_treadmill_environment(env_idx):
 
     def make_env():
-        np.random.seed(env_idx)
+        np.random.seed(env_idx + 2)
         
         n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
         reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
+        decay_consts_for_reward_funcs = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_DECAY_CONST - MIN_REWARD_DECAY_CONST) + MIN_REWARD_DECAY_CONST
 
-        print('Begin det. treadmill')
+        print('Begin expected. treadmill')
+        print(decay_consts_for_reward_funcs)
 
         patches = []
         for i in range(PATCH_TYPES_PER_ENV):
-            def reward_func(site_idx):
-                return 1
+            decay_const_for_i = decay_consts_for_reward_funcs[i]
+            def reward_func(site_idx, decay_const_for_i=decay_const_for_i):
+                c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_const_for_i)
+                return c
             patches.append(
                 Patch(
                     n_reward_sites_for_patches[i],
@@ -93,7 +79,7 @@ def make_deterministic_treadmill_environment(env_idx):
                     INTERREWARD_SITE_LEN_MEAN,
                     reward_func,
                     i,
-                    reward_func_param=0
+                    reward_func_param=decay_consts_for_reward_funcs[i],
                 )
             )
 
@@ -172,51 +158,25 @@ def objective(trial):
     make_path_if_not_exists(reward_rates_output_dir)
     make_path_if_not_exists(info_output_dir)
 
-    if trial is not None:
-        gamma = trial.suggest_float('gamma', 0.9, 1.0)
-        learning_rate = trial.suggest_float('learning_rate', 1e-4, 3e-3, log=True)
-        critic_weight = trial.suggest_float('critic_weight', 1e-4, 1e-1, log=True)
-        entropy_weight = trial.suggest_float('entropy_weight', 1e-6, 1e-2, log=True)
-    else:
-        gamma = GAMMA
-        learning_rate = LEARNING_RATE
-        critic_weight = CRITIC_WEIGHT
-        entropy_weight = ENTROPY_WEIGHT
 
-    network = A2CRNN(
-        input_size=OBS_SIZE + ACTION_SIZE + 1,
-        action_size=ACTION_SIZE,
-        hidden_size=HIDDEN_SIZE,
-        device=DEVICE,
-    )
-
-    agent = A2CRecurrentAgent(
-        network,
-        action_space_dims=ACTION_SIZE,
+    agent = GridSearchAgent(
         n_envs=NUM_ENVS,
-        device=DEVICE,
-        critic_weight=critic_weight, # changed for Optuna
-        entropy_weight=entropy_weight, # changed for Optuna
-        gamma=gamma, # changed for Optuna
-        learning_rate=learning_rate, # changed for Optuna
+        wait_time_for_reward=DWELL_TIME_FOR_REWARD - MIN_REWARD_SITE_LEN,
+        odor_cues_indices=(2, 5),
+        patch_cue_idx=0,
+        max_stops_per_patch=8,
     )
-
-    print(network.rnn)
 
     curricum = Curriculum(
-        curriculum_step_starts=[0, 800],
+        curriculum_step_starts=[0, 18500],
         curriculum_step_env_funcs=[
-            make_deterministic_treadmill_environment,
+            make_expected_treadmill_environment,
             make_stochastic_treadmill_environment,
         ],
     )
 
     env_seeds = np.arange(NUM_ENVS)
 
-    total_losses = np.empty((N_UPDATES))
-    actor_losses = np.empty((N_UPDATES))
-    critic_losses = np.empty((N_UPDATES))
-    entropy_losses = np.empty((N_UPDATES))
     avg_rewards_per_update = np.empty((NUM_ENVS, N_UPDATES))
     all_info = []
 
@@ -231,26 +191,16 @@ def objective(trial):
         total_rewards = np.empty((NUM_ENVS, N_STEPS_PER_UPDATE))
         for step in range(N_STEPS_PER_UPDATE):
             action = agent.sample_action(obs)
-            action = action.cpu().numpy()
             obs, reward, terminated, truncated, info = envs.step(action)
             agent.append_reward(reward.astype('float32'))
             total_rewards[:, step] = reward
             all_info.append(info)
 
         avg_rewards_per_update[:, sample_phase] = np.mean(total_rewards, axis=1)
-        total_loss, actor_loss, critic_loss, entropy_loss = agent.get_losses()
-        agent.update(total_loss)
         reset_network = sample_phase % N_UPDATES_PER_RESET == 0 and sample_phase > 0
         if reset_network:
+            agent.cue_session_end()
             agent.reset_state()
-        else:
-            hidden_states = agent.reset_state()
-            agent.set_state(hidden_states)
-
-        total_losses[sample_phase] = total_loss.detach().cpu().numpy()
-        actor_losses[sample_phase] = actor_loss.detach().cpu().numpy()
-        critic_losses[sample_phase] = critic_loss.detach().cpu().numpy()
-        entropy_losses[sample_phase] = entropy_loss.detach().cpu().numpy()
 
         steps_before_prune = 100
 
@@ -273,11 +223,6 @@ def objective(trial):
 
 
     final_value = avg_rewards_per_update[:, -1 * steps_before_prune:].mean()
-    print('final_reward_total', final_value)
-    print('gamma', gamma)
-    print('learning_rate', learning_rate)
-    print('critic_weight', critic_weight)
-    print('entropy_weight', entropy_weight)
 
     return final_value
 

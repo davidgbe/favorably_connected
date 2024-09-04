@@ -31,7 +31,7 @@ class A2CRNN(nn.Module):
         self.device = device
         self.rnn = nn.GRUCell(
             input_size=self.input_size, 
-            hidden_size=hidden_size, 
+            hidden_size=hidden_size,
         ).to(device)
         self.action_arm = nn.Linear(hidden_size, action_size).to(device)
         self.value_arm = nn.Linear(hidden_size, 1).to(device)
