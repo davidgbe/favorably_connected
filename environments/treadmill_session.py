@@ -1,6 +1,7 @@
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+from bisect import bisect
 
 class TreadmillSession(gym.Env):
 
@@ -16,6 +17,8 @@ class TreadmillSession(gym.Env):
         first_patch_start=None,
     ):
         self.patches = patches
+        self.current_patch = None
+        self.current_patch_num = None
         self.transition_mat = transition_mat
         self.interpatch_len = interpatch_len
         self.dwell_time_for_reward = dwell_time_for_reward
@@ -91,10 +94,13 @@ class TreadmillSession(gym.Env):
 
 
     def get_reward_site_idx_from_pos(self, pos):
-        for idx, reward_site_bounds in enumerate(self.reward_bounds):
-            if pos >= reward_site_bounds[0] and pos < reward_site_bounds[1]:
-                return idx
-        return -1
+        idx = bisect(self.reward_bound_starts, pos) - 1
+        if idx < 0:
+            return -1
+        if pos < self.reward_bound_starts[idx] + self.reward_site_len:
+            return idx
+        else:
+            return -1
 
 
     def get_reward_site_idx_of_current_pos(self):
@@ -140,6 +146,8 @@ class TreadmillSession(gym.Env):
                     patch_id = self.generate_next_patch()
                     self.wprint(f'Generate patch of type {patch_id}')
                     self.set_current_patch(patch_id, patch_start=new_patch_start)
+                else:
+                    pass # TODO
                 self.reward_site_dwell_time = 0
                 self.current_reward_site_attempted = False
 
@@ -175,6 +183,9 @@ class TreadmillSession(gym.Env):
         if patch_start is None:
             patch_start = self.current_patch_bounds[1] + self.interpatch_len
         self.current_patch_bounds, self.reward_bounds  = self.current_patch.get_bounds(patch_start)
+        self.reward_bound_starts = [rb[0] for rb in self.reward_bounds]
+        self.reward_site_len = self.reward_bounds[0][1] - self.reward_bounds[0][0]
+        
 
         self.wprint(f'New patch created!')
         self.wprint(f'Patch bounds are [{self.current_patch_bounds[0]}, {self.current_patch_bounds[1]}]')
@@ -198,7 +209,7 @@ class TreadmillSession(gym.Env):
             observations[1] = 1
         
         if self.get_reward_site_idx_of_current_pos() != -1:
-            observations[2 + self.current_patch_num] = 1
+            observations[2 + self.current_patch.get_odor_num()] = 1
         
         return observations
 

@@ -24,14 +24,14 @@ import pickle
 
 # ENVIRONEMENT PARAMS
 PATCH_TYPES_PER_ENV = 3
-OBS_SIZE = PATCH_TYPES_PER_ENV + 2
+OBS_SIZE = 5
 ACTION_SIZE = 2
 DWELL_TIME_FOR_REWARD = 6
 SPATIAL_BUFFER_FOR_VISUAL_CUES = 1.5
 MAX_REWARD_SITE_LEN = 2
 MIN_REWARD_SITE_LEN = 2
-MAX_N_REWARD_SITES_PER_PATCH = 100
-MIN_N_REWARD_SITES_PER_PATCH = 100
+MAX_N_REWARD_SITES_PER_PATCH = 10
+MIN_N_REWARD_SITES_PER_PATCH = 10
 INTERREWARD_SITE_LEN_MEAN = 2
 MAX_REWARD_DECAY_CONST = 30
 MIN_REWARD_DECAY_CONST = 0.1
@@ -63,7 +63,7 @@ N_UPDATES_PER_RESET = 25
 # OTHER PARMS
 DEVICE = 'cuda'
 OUTPUT_SAVE_RATE = 200
-OUTPUT_BASE_DIR = './data/rl_agent_outputs'
+OUTPUT_BASE_DIR = './data/rl_agent_block_curricula'
 
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
@@ -72,32 +72,34 @@ args = parser.parse_args()
 
 
 
-def make_deterministic_treadmill_environment(env_idx):
+def make_deterministic_treadmill_single_patch_environment(env_idx):
 
     def make_env():
         np.random.seed(env_idx)
+        initial_patch_odor_num = np.random.randint(0, 3)
         
-        n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
-        reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
-
         print('Begin det. treadmill')
 
         patches = []
-        for i in range(PATCH_TYPES_PER_ENV):
-            def reward_func(site_idx):
-                return 1
-            patches.append(
-                Patch(
-                    n_reward_sites_for_patches[i],
-                    reward_site_len_for_patches[i],
-                    INTERREWARD_SITE_LEN_MEAN,
-                    reward_func,
-                    i,
-                    reward_func_param=0
-                )
-            )
 
-        transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
+        def reward_func(site_idx):
+            if site_idx < 3:
+                return 1
+            else:
+                return 0
+
+        patches.append(
+            Patch(
+                MIN_N_REWARD_SITES_PER_PATCH,
+                MIN_REWARD_SITE_LEN,
+                INTERREWARD_SITE_LEN_MEAN,
+                reward_func,
+                initial_patch_odor_num,
+                reward_func_param=0,
+            )
+        )
+
+        transition_mat = np.ones((1, 1))
 
         sesh = TreadmillSession(
             patches,
@@ -105,7 +107,7 @@ def make_deterministic_treadmill_environment(env_idx):
             INTERPATCH_LEN,
             DWELL_TIME_FOR_REWARD,
             SPATIAL_BUFFER_FOR_VISUAL_CUES,
-            obs_size=PATCH_TYPES_PER_ENV + 2,
+            obs_size=OBS_SIZE,
             verbosity=False,
         )
 
@@ -114,39 +116,49 @@ def make_deterministic_treadmill_environment(env_idx):
     return make_env
 
 
-def make_stochastic_treadmill_environment(env_idx):
+def make_stochastic_two_treadmill_environment(env_idx):
 
     def make_env():
-        np.random.seed(env_idx + 2)
+        np.random.seed(env_idx)
+        initial_patch_odor_num = np.random.randint(0, 3)
+        remaining_odor_nums = [0, 1, 2]
+        remaining_odor_nums.remove(initial_patch_odor_num)
+        second_odor_patch_num = remaining_odor_nums[np.random.randint(2)]
         
-        n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
-        reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
-        decay_consts_for_reward_funcs = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_DECAY_CONST - MIN_REWARD_DECAY_CONST) + MIN_REWARD_DECAY_CONST
-
-        print('Begin stoch. treadmill')
-        print(decay_consts_for_reward_funcs)
-
         patches = []
-        for i in range(PATCH_TYPES_PER_ENV):
-            decay_const_for_i = decay_consts_for_reward_funcs[i]
-            def reward_func(site_idx, decay_const_for_i=decay_const_for_i):
-                c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_const_for_i)
-                if np.random.rand() < c:
-                    return 1
-                else:
-                    return 0
-            patches.append(
-                Patch(
-                    n_reward_sites_for_patches[i],
-                    reward_site_len_for_patches[i],
-                    INTERREWARD_SITE_LEN_MEAN,
-                    reward_func,
-                    i,
-                    reward_func_param=decay_consts_for_reward_funcs[i],
-                )
-            )
 
-        transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
+        def initial_patch_reward_func(site_idx):
+            return 0
+
+        patches.append(
+            Patch(
+                MIN_N_REWARD_SITES_PER_PATCH,
+                MIN_REWARD_SITE_LEN,
+                INTERREWARD_SITE_LEN_MEAN,
+                initial_patch_reward_func,
+                initial_patch_odor_num,
+                reward_func_param=0,
+            )
+        )
+
+        def second_patch_reward_func(site_idx):
+            if site_idx >= 3 and np.random.rand() < REWARD_PROB_PREFACTOR:
+                return 1
+            else:
+                return 0
+
+        patches.append(
+            Patch(
+                MIN_N_REWARD_SITES_PER_PATCH,
+                MIN_REWARD_SITE_LEN,
+                INTERREWARD_SITE_LEN_MEAN,
+                second_patch_reward_func,
+                second_odor_patch_num,
+                reward_func_param=2,
+            )
+        )
+
+        transition_mat = 1/2 * np.ones((2, 2))
 
         sesh = TreadmillSession(
             patches,
@@ -154,7 +166,85 @@ def make_stochastic_treadmill_environment(env_idx):
             INTERPATCH_LEN,
             DWELL_TIME_FOR_REWARD,
             SPATIAL_BUFFER_FOR_VISUAL_CUES,
-            obs_size=PATCH_TYPES_PER_ENV + 2,
+            obs_size=OBS_SIZE,
+            verbosity=False,
+        )
+
+        return sesh
+
+    return make_env
+
+
+def make_stochastic_three_treadmill_environment(env_idx):
+
+    def make_env():
+        np.random.seed(env_idx)
+        initial_patch_odor_num = np.random.randint(0, 3)
+        remaining_odor_nums = [0, 1, 2]
+        remaining_odor_nums.remove(initial_patch_odor_num)
+        second_odor_patch_num = remaining_odor_nums[np.random.randint(2)]
+        remaining_odor_nums.remove(second_odor_patch_num)
+        third_odor_patch_num = remaining_odor_nums[0]
+        
+        patches = []
+
+        def initial_patch_reward_func(site_idx):
+            return 0
+
+        patches.append(
+            Patch(
+                MIN_N_REWARD_SITES_PER_PATCH,
+                MIN_REWARD_SITE_LEN,
+                INTERREWARD_SITE_LEN_MEAN,
+                initial_patch_reward_func,
+                initial_patch_odor_num,
+                reward_func_param=0,
+            )
+        )
+
+        def second_patch_reward_func(site_idx):
+            if site_idx >= 3 and np.random.rand() < REWARD_PROB_PREFACTOR:
+                return 1
+            else:
+                return 0
+
+        patches.append(
+            Patch(
+                MIN_N_REWARD_SITES_PER_PATCH,
+                MIN_REWARD_SITE_LEN,
+                INTERREWARD_SITE_LEN_MEAN,
+                second_patch_reward_func,
+                second_odor_patch_num,
+                reward_func_param=2,
+            )
+        )
+
+        def third_patch_reward_func(site_idx):
+            if site_idx < 3 and np.random.rand() < REWARD_PROB_PREFACTOR:
+                return 1
+            else:
+                return 0
+
+        patches.append(
+            Patch(
+                MIN_N_REWARD_SITES_PER_PATCH,
+                MIN_REWARD_SITE_LEN,
+                INTERREWARD_SITE_LEN_MEAN,
+                third_patch_reward_func,
+                third_odor_patch_num,
+                reward_func_param=1,
+            )
+        )
+
+        transition_mat = 1/3 * np.ones((3, 3))
+
+        sesh = TreadmillSession(
+            patches,
+            transition_mat,
+            INTERPATCH_LEN,
+            DWELL_TIME_FOR_REWARD,
+            SPATIAL_BUFFER_FOR_VISUAL_CUES,
+            obs_size=OBS_SIZE,
             verbosity=False,
         )
 
@@ -201,13 +291,12 @@ def objective(trial):
         learning_rate=learning_rate, # changed for Optuna
     )
 
-    print(network.rnn)
-
     curricum = Curriculum(
-        curriculum_step_starts=[0, 800],
+        curriculum_step_starts=[0, 1000, 5000],
         curriculum_step_env_funcs=[
-            make_deterministic_treadmill_environment,
-            make_stochastic_treadmill_environment,
+            make_deterministic_treadmill_single_patch_environment,
+            make_stochastic_two_treadmill_environment,
+            make_stochastic_three_treadmill_environment,
         ],
     )
 
