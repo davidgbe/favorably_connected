@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 
 
 class A2CRNN(nn.Module):
@@ -13,7 +14,7 @@ class A2CRNN(nn.Module):
     Adjusted for the WCST
     """
 
-    def __init__(self, input_size, action_size, hidden_size, device='cpu'):
+    def __init__(self, input_size, action_size, hidden_size, var_noise=0, device='cpu'):
         """Initializes a neural network that estimates the logits to a 
         categorical action distrbution, as well as the value of that state
 
@@ -37,6 +38,7 @@ class A2CRNN(nn.Module):
         self.value_arm = nn.Linear(hidden_size, 1).to(device)
         # hidden states of [n_layers, n_envs, hidden_size]
         self.hidden_states = None
+        self.var_noise = var_noise
     
     def reset_state(self):
         hidden_states = self.hidden_states.detach().cpu()
@@ -64,9 +66,12 @@ class A2CRNN(nn.Module):
         else: 
             # need to add a dimension for num_layers
             new_hidden_states = self.rnn(inputs, self.hidden_states)
+
+        # print('Hidden states mean', new_hidden_states.norm(1).mean().cpu())
+        new_hidden_states += (self.var_noise**0.5) * torch.randn(new_hidden_states.shape).detach().to(self.device) # add gaussian noise to activity
         self.hidden_states = new_hidden_states
         # need to get rid of layers dimension, which is at dim 0. 
         action_logits = self.action_arm(new_hidden_states)
         value = self.value_arm(new_hidden_states)
         # values have 2nd dimension of 1, get rid of it
-        return (action_logits, value.squeeze(1))
+        return (action_logits, value.squeeze(1), new_hidden_states.clone())

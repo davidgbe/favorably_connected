@@ -9,7 +9,7 @@ class A2CRecurrentAgent:
     Supports multple environments
     Implementation adapted from: https://gymnasium.farama.org/tutorials/gymnasium_basics/vector_envs_tutorial/
     """
-    def __init__(self, network, action_space_dims, n_envs, device="cpu",
+    def __init__(self, network, action_space_dims, n_envs, device="cpu", activity_weight=0,
                  critic_weight=0.05, entropy_weight=0.05, learning_rate=7e-4, gamma=0.9):
         """
         Initializes recurrent agent: 
@@ -28,6 +28,7 @@ class A2CRecurrentAgent:
         self.critic_weight = critic_weight
         self.entropy_weight = entropy_weight
         self.learning_rate = learning_rate  # Learning rate for policy optimization
+        self.activity_weight = activity_weight
         self.gamma = gamma  # Discount factor
         self.action_space_dims = action_space_dims
         self.n_envs = n_envs
@@ -37,6 +38,7 @@ class A2CRecurrentAgent:
         self.values = [] 
         self.entropies = []
         self.actions = []
+        self.squared_activities = []
 
         self.optimizer = torch.optim.RMSprop(self.net.parameters(), lr=self.learning_rate)
 
@@ -65,7 +67,7 @@ class A2CRecurrentAgent:
         ), dim=1).to(self.device)
 
         # run through the network
-        action_logits, value = self.net(inputs)
+        action_logits, value, hidden_unit_activity = self.net(inputs)
 
         # sample from action probs
         distrib = Categorical(logits=action_logits)
@@ -78,6 +80,7 @@ class A2CRecurrentAgent:
         self.values.append(value)
         self.actions.append(action)
         self.entropies.append(entropy)
+        self.squared_activities.append(hidden_unit_activity.pow(2).mean())
 
         return action
     
@@ -132,6 +135,7 @@ class A2CRecurrentAgent:
         rewards = torch.stack(self.rewards).to(self.device)
         values = torch.stack(self.values).to(self.device)
         entropies = torch.stack(self.entropies).to(self.device)
+        activities = torch.stack(self.squared_activities)
         # make this an object attribute since it's useful for debugging later
         td_errs = torch.zeros((T, self.n_envs)).to(self.device)
 
@@ -155,7 +159,9 @@ class A2CRecurrentAgent:
         # want to ENCOURAGE high entropy, so define negative loss
         entropy_loss = -entropies.mean()
 
-        total_loss = actor_loss + self.critic_weight * critic_loss + self.entropy_weight * entropy_loss
+        activity_loss = activities.mean()
+
+        total_loss = actor_loss + self.critic_weight * critic_loss + self.entropy_weight * entropy_loss + self.activity_weight * activity_loss
         return (total_loss, actor_loss, critic_loss, entropy_loss)
 
 
@@ -184,6 +190,7 @@ class A2CRecurrentAgent:
         self.rewards = []
         self.values = []
         self.entropies = []
+        self.squared_activities = []
         return hidden_states
 
 

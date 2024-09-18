@@ -44,8 +44,6 @@ CRITIC_WEIGHT = 0.07846647668470078
 ENTROPY_WEIGHT = 1.0158892869509133e-06
 GAMMA = 0.9867118269299845
 LEARNING_RATE = 0.0006006712322528219
-ACTIVITY_WEIGHT = 0
-VAR_NOISE = 0
 
 '''
 {
@@ -166,9 +164,9 @@ def make_stochastic_treadmill_environment(env_idx):
 
 
 
-def objective(trial):
+def objective(trial, var_noise, activity_weight):
     time_stamp = str(datetime.now()).replace(' ', '_').replace(':', '_').replace('.', '_')
-    output_dir = os.path.join(OUTPUT_BASE_DIR, '_'.join([args.exp_title, time_stamp]))
+    output_dir = os.path.join(OUTPUT_BASE_DIR, '_'.join([args.exp_title, time_stamp, f'var_noise_{var_noise}', f'activity_weight_{activity_weight}']))
     reward_rates_output_dir = os.path.join(output_dir, 'reward_rates')
     info_output_dir = os.path.join(output_dir, 'state')
     make_path_if_not_exists(reward_rates_output_dir)
@@ -190,7 +188,7 @@ def objective(trial):
         action_size=ACTION_SIZE,
         hidden_size=HIDDEN_SIZE,
         device=DEVICE,
-        var_noise=VAR_NOISE,
+        var_noise=var_noise,
     )
 
     agent = A2CRecurrentAgent(
@@ -202,7 +200,7 @@ def objective(trial):
         entropy_weight=entropy_weight, # changed for Optuna
         gamma=gamma, # changed for Optuna
         learning_rate=learning_rate, # changed for Optuna
-        activity_weight=ACTIVITY_WEIGHT,
+        activity_weight=activity_weight,
     )
 
     curricum = Curriculum(
@@ -285,15 +283,6 @@ def objective(trial):
 
 if __name__ == "__main__":
     
-    # study = optuna.create_study(
-    #     direction='maximize',
-    #     pruner=optuna.pruners.MedianPruner(
-    #         n_startup_trials=5,
-    #         n_warmup_steps=5000,
-    #         interval_steps=10,
-    #     ),
-    # )
-    # study.optimize(objective, n_trials=20)
-    # print(study.best_params)
-
-    print(objective(None))
+    for var_noise in [1e-2, 1e-1]:
+        for activity_weight in [1, 1e1, 1e2]:
+            print(objective(None, var_noise, activity_weight))
