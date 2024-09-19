@@ -7,7 +7,7 @@ class TreadmillSession(gym.Env):
 
     def __init__(
         self,
-        patches,
+        patches_types,
         transition_mat,
         interpatch_len,
         dwell_time_for_reward,
@@ -16,9 +16,9 @@ class TreadmillSession(gym.Env):
         verbosity=True,
         first_patch_start=None,
     ):
-        self.patches = patches
+        self.patches_types = patches_types
         self.current_patch = None
-        self.current_patch_num = None
+        self.current_patch_type_num = None
         self.transition_mat = transition_mat
         self.interpatch_len = interpatch_len
         self.dwell_time_for_reward = dwell_time_for_reward
@@ -86,25 +86,19 @@ class TreadmillSession(gym.Env):
 
 
     def is_position_in_current_patch(self, pos):
-        return (pos >= self.current_patch_bounds[0] and pos < self.current_patch_bounds[1])
+        return self.current_patch.contains_position(pos)
 
 
     def is_agent_in_current_patch(self):
-        return self.is_position_in_current_patch(self.current_position)
+        return self.current_patch.contains_position(self.current_position)
 
 
     def get_reward_site_idx_from_pos(self, pos):
-        idx = bisect(self.reward_bound_starts, pos) - 1
-        if idx < 0:
-            return -1
-        if pos < self.reward_bound_starts[idx] + self.reward_site_len:
-            return idx
-        else:
-            return -1
+        self.current_patch.get_odor_site_idx_of_pos(pos)
 
 
     def get_reward_site_idx_of_current_pos(self):
-        return self.get_reward_site_idx_from_pos(self.current_position)
+        return self.current_patch.get_reward_site_idx_from_pos(self.current_position)
 
     
     def move_forward(self, dist):
@@ -163,35 +157,26 @@ class TreadmillSession(gym.Env):
         return immediate_reward
 
 
-    def generate_next_patch(self):
+    def generate_next_patch_type_num(self):
         roll = np.random.rand()
-        trans_probs = self.transition_mat[self.last_patch_num]
+        trans_probs = self.transition_mat[self.last_patch_type_num]
         cumulative_prob = 0
-        next_patch_num = None
+        next_patch_type_num = None
         for i in range(len(trans_probs)):
             if roll <= cumulative_prob + trans_probs[i]:
-                next_patch_num = i
+                next_patch_type_num = i
                 break
             cumulative_prob += trans_probs[i]
-        return next_patch_num
+        return next_patch_type_num
 
 
-    def set_current_patch(self, patch_num, patch_start=None):
-        self.last_patch_num = self.current_patch_num
-        self.current_patch_num = patch_num
-        self.current_patch = self.patches[self.current_patch_num]
+    def set_current_patch(self, patch_type_num, patch_start=None):
+        self.last_patch_type_num = self.current_patch_type_num
+        self.current_patch_type_num = patch_type_num
         if patch_start is None:
-            patch_start = self.current_patch_bounds[1] + self.interpatch_len
-        self.current_patch_bounds, self.reward_bounds  = self.current_patch.get_bounds(patch_start)
-        self.reward_bound_starts = [rb[0] for rb in self.reward_bounds]
-        self.reward_site_len = self.reward_bounds[0][1] - self.reward_bounds[0][0]
-        
-
+            patch_start = self.current_patch.get_end() + self.interpatch_len
+        self.current_patch = self.patches_types[self.current_patch_num].generate_patch_instance(patch_start)
         self.wprint(f'New patch created!')
-        self.wprint(f'Patch bounds are [{self.current_patch_bounds[0]}, {self.current_patch_bounds[1]}]')
-        self.wprint('Current reward bounds are:')
-        for k in range(len(self.reward_bounds)):
-            self.wprint(f'[{self.reward_bounds[k][0]}, {self.reward_bounds[k][1]}]')
 
 
     def get_observations(self):
