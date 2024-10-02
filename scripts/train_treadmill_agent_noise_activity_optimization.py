@@ -279,10 +279,12 @@ def objective(trial, var_noise, activity_weight):
     print('critic_weight', critic_weight)
     print('entropy_weight', entropy_weight)
 
+    torch.save(network.state_dict(), os.path.join(output_dir, "rnn_weights.h5"))
+
     return final_value
 
 if __name__ == "__main__":
     
-    for var_noise in [1e-2, 1e-1]:
+    for var_noise in [1e-4, 1e-2, 1]:
         for activity_weight in [1, 1e1, 1e2]:
             print(objective(None, var_noise, activity_weight))

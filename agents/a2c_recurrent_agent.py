@@ -38,7 +38,7 @@ class A2CRecurrentAgent:
         self.values = [] 
         self.entropies = []
         self.actions = []
-        self.squared_activities = []
+        self.activities = []
 
         self.optimizer = torch.optim.RMSprop(self.net.parameters(), lr=self.learning_rate)
 
@@ -80,7 +80,7 @@ class A2CRecurrentAgent:
         self.values.append(value)
         self.actions.append(action)
         self.entropies.append(entropy)
-        self.squared_activities.append(hidden_unit_activity.pow(2).mean())
+        self.activities.append(hidden_unit_activity)
 
         return action
     
@@ -135,7 +135,7 @@ class A2CRecurrentAgent:
         rewards = torch.stack(self.rewards).to(self.device)
         values = torch.stack(self.values).to(self.device)
         entropies = torch.stack(self.entropies).to(self.device)
-        activities = torch.stack(self.squared_activities)
+        activities = torch.stack(self.activities)
         # make this an object attribute since it's useful for debugging later
         td_errs = torch.zeros((T, self.n_envs)).to(self.device)
 
@@ -159,7 +159,7 @@ class A2CRecurrentAgent:
         # want to ENCOURAGE high entropy, so define negative loss
         entropy_loss = -entropies.mean()
 
-        activity_loss = activities.mean()
+        activity_loss = activities.pow(2).mean()
 
         total_loss = actor_loss + self.critic_weight * critic_loss + self.entropy_weight * entropy_loss + self.activity_weight * activity_loss
         return (total_loss, actor_loss, critic_loss, entropy_loss)
@@ -190,10 +190,14 @@ class A2CRecurrentAgent:
         self.rewards = []
         self.values = []
         self.entropies = []
-        self.squared_activities = []
+        self.activities = []
         return hidden_states
 
 
     def set_state(self, hidden_states):
         self.net.set_state(hidden_states)
+
+
+    def get_hidden_state_activities(self):
+        return torch.stack(self.activities)
 
