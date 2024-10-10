@@ -81,6 +81,7 @@ class TreadmillSession(gym.Env):
             first_patch_start = np.random.randint(0, 3)
         self.set_current_patch(self.current_patch_num, patch_start=first_patch_start)
         self.total_reward = 0
+        self.reward_in_patch = 0
         self.reward_site_dwell_time = 0
         self.current_reward_site_attempted = False
 
@@ -128,8 +129,9 @@ class TreadmillSession(gym.Env):
                 self.reward_site_dwell_time += 1
                 # odor cue given
                 if self.reward_site_dwell_time >= self.dwell_time_for_reward and not self.current_reward_site_attempted:
-                    immediate_reward += self.current_patch.get_reward(current_reward_site_idx)
+                    immediate_reward += self.current_patch.get_reward(self.reward_in_patch)
                     self.total_reward += immediate_reward
+                    self.reward_in_patch += immediate_reward
                     self.current_reward_site_attempted = True
                 
                 self.wprint(f'Agent is at reward site {current_reward_site_idx}')
@@ -153,6 +155,7 @@ class TreadmillSession(gym.Env):
 
         if self.is_position_in_current_patch(old_position) and not self.is_agent_in_current_patch() and self.get_reward_site_idx_from_pos(old_position) == (self.current_patch.n_reward_sites - 1): # agent was just in a patch but has left
             self.reward_site_dwell_time = 0
+            self.reward_in_patch = 0
             self.current_reward_site_attempted = False
             patch_id = self.generate_next_patch()
             self.wprint(f'Generate patch of type {patch_id}')
