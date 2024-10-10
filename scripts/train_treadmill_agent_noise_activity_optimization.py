@@ -30,8 +30,8 @@ DWELL_TIME_FOR_REWARD = 6
 SPATIAL_BUFFER_FOR_VISUAL_CUES = 1.5
 MAX_REWARD_SITE_LEN = 2
 MIN_REWARD_SITE_LEN = 2
-MAX_N_REWARD_SITES_PER_PATCH = 8
-MIN_N_REWARD_SITES_PER_PATCH = 8
+MAX_N_REWARD_SITES_PER_PATCH = 16
+MIN_N_REWARD_SITES_PER_PATCH = 16
 INTERREWARD_SITE_LEN_MEAN = 2
 MAX_REWARD_DECAY_CONST = 30
 MIN_REWARD_DECAY_CONST = 0.1
@@ -122,6 +122,8 @@ def make_stochastic_treadmill_environment(env_idx):
         n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
         reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
         decay_consts_for_reward_funcs = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_DECAY_CONST - MIN_REWARD_DECAY_CONST) + MIN_REWARD_DECAY_CONST
+        inactive_patch = np.random.randint(0, high=PATCH_TYPES_PER_ENV)
+
 
         print('Begin stoch. treadmill')
         print(decay_consts_for_reward_funcs)
@@ -129,9 +131,10 @@ def make_stochastic_treadmill_environment(env_idx):
         patches = []
         for i in range(PATCH_TYPES_PER_ENV):
             decay_const_for_i = decay_consts_for_reward_funcs[i]
-            def reward_func(site_idx, decay_const_for_i=decay_const_for_i):
+            active = (i != inactive_patch)
+            def reward_func(site_idx, decay_const_for_i=decay_const_for_i, active=active):
                 c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_const_for_i)
-                if np.random.rand() < c:
+                if np.random.rand() < c and active:
                     return 1
                 else:
                     return 0
@@ -142,7 +145,7 @@ def make_stochastic_treadmill_environment(env_idx):
                     INTERREWARD_SITE_LEN_MEAN,
                     reward_func,
                     i,
-                    reward_func_param=decay_consts_for_reward_funcs[i],
+                    reward_func_param=(decay_consts_for_reward_funcs[i] if active else 0),
                 )
             )
 
@@ -285,6 +288,6 @@ def objective(trial, var_noise, activity_weight):
 
 if __name__ == "__main__":
     
-    for var_noise in [1e-4, 1e-2, 1]:
-        for activity_weight in [1, 1e1, 1e2]:
+    for var_noise in [0]:
+        for activity_weight in [0]:
             print(objective(None, var_noise, activity_weight))
