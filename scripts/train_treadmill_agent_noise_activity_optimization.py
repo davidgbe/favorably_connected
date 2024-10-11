@@ -20,6 +20,7 @@ from datetime import datetime
 import argparse
 import multiprocessing as mp
 import pickle
+from copy import deepcopy as copy
 
 
 # ENVIRONEMENT PARAMS
@@ -33,8 +34,7 @@ MIN_REWARD_SITE_LEN = 2
 MAX_N_REWARD_SITES_PER_PATCH = 16
 MIN_N_REWARD_SITES_PER_PATCH = 16
 INTERREWARD_SITE_LEN_MEAN = 2
-MAX_REWARD_DECAY_CONST = 30
-MIN_REWARD_DECAY_CONST = 0.1
+REWARD_DECAY_CONSTS = [0, 10, 30]
 REWARD_PROB_PREFACTOR = 0.8
 INTERPATCH_LEN = 6
 
@@ -58,7 +58,7 @@ LEARNING_RATE = 0.0006006712322528219
 NUM_ENVS = 20
 N_UPDATES = 20000
 N_STEPS_PER_UPDATE = 200
-N_UPDATES_PER_RESET = 100
+N_UPDATES_PER_RESET = 25
 
 # OTHER PARMS
 DEVICE = 'cuda'
@@ -93,7 +93,7 @@ def make_deterministic_treadmill_environment(env_idx):
                     INTERREWARD_SITE_LEN_MEAN,
                     reward_func,
                     i,
-                    reward_func_param=0
+                    reward_func_param=0,
                 )
             )
 
@@ -117,13 +117,12 @@ def make_deterministic_treadmill_environment(env_idx):
 def make_stochastic_treadmill_environment(env_idx):
 
     def make_env():
-        np.random.seed(env_idx + 2)
+        np.random.seed(env_idx + NUM_ENVS)
         
         n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
         reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
-        decay_consts_for_reward_funcs = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_DECAY_CONST - MIN_REWARD_DECAY_CONST) + MIN_REWARD_DECAY_CONST
-        inactive_patch = np.random.randint(0, high=PATCH_TYPES_PER_ENV)
-
+        decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
+        np.random.shuffle(decay_consts_for_reward_funcs)
 
         print('Begin stoch. treadmill')
         print(decay_consts_for_reward_funcs)
@@ -131,13 +130,13 @@ def make_stochastic_treadmill_environment(env_idx):
         patches = []
         for i in range(PATCH_TYPES_PER_ENV):
             decay_const_for_i = decay_consts_for_reward_funcs[i]
-            active = (i != inactive_patch)
+            active = (decay_const_for_i != 0)
             def reward_func(site_idx, decay_const_for_i=decay_const_for_i, active=active):
                 c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_const_for_i)
                 if np.random.rand() < c and active:
                     return 1
                 else:
-                    return 0
+                    return -1
             patches.append(
                 Patch(
                     n_reward_sites_for_patches[i],
