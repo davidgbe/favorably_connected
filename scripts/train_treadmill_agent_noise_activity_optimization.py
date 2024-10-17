@@ -56,9 +56,9 @@ LEARNING_RATE = 0.0006006712322528219
 
 # TRAINING PARAMS
 NUM_ENVS = 20
-N_UPDATES = 20000
+N_UPDATES = 200000
 N_STEPS_PER_UPDATE = 200
-N_UPDATES_PER_RESET = 25
+N_UPDATES_PER_RESET = 50
 
 # OTHER PARMS
 DEVICE = 'cuda'
@@ -93,7 +93,7 @@ def make_deterministic_treadmill_environment(env_idx):
                     INTERREWARD_SITE_LEN_MEAN,
                     reward_func,
                     i,
-                    reward_func_param=0,
+                    reward_func_param=0.0,
                 )
             )
 
@@ -132,7 +132,7 @@ def make_stochastic_treadmill_environment(env_idx):
             decay_const_for_i = decay_consts_for_reward_funcs[i]
             active = (decay_const_for_i != 0)
             def reward_func(site_idx, decay_const_for_i=decay_const_for_i, active=active):
-                c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_const_for_i)
+                c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_const_for_i) if decay_const_for_i > 0 else 0
                 if np.random.rand() < c and active:
                     return 1
                 else:
@@ -144,7 +144,7 @@ def make_stochastic_treadmill_environment(env_idx):
                     INTERREWARD_SITE_LEN_MEAN,
                     reward_func,
                     i,
-                    reward_func_param=(decay_consts_for_reward_funcs[i] if active else 0),
+                    reward_func_param=(decay_consts_for_reward_funcs[i] if active else 0.0),
                 )
             )
 

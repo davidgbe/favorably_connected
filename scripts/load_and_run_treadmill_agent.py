@@ -74,6 +74,7 @@ def make_stochastic_treadmill_environment(env_idx):
         n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
         reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
         decay_consts_for_reward_funcs = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_DECAY_CONST - MIN_REWARD_DECAY_CONST) + MIN_REWARD_DECAY_CONST
+        silent_patch_idx = np.random.randint(0, high=PATCH_TYPES_PER_ENV)
 
         print('Begin stoch. treadmill')
         print(decay_consts_for_reward_funcs)
@@ -81,9 +82,10 @@ def make_stochastic_treadmill_environment(env_idx):
         patches = []
         for i in range(PATCH_TYPES_PER_ENV):
             decay_const_for_i = decay_consts_for_reward_funcs[i]
-            def reward_func(site_idx, decay_const_for_i=decay_const_for_i):
+            active = (i != silent_patch_idx)
+            def reward_func(site_idx, decay_const_for_i=decay_const_for_i, active=active):
                 c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_const_for_i)
-                if np.random.rand() < c:
+                if np.random.rand() < c and active:
                     return 1
                 else:
                     return 0
@@ -94,7 +96,7 @@ def make_stochastic_treadmill_environment(env_idx):
                     INTERREWARD_SITE_LEN_MEAN,
                     reward_func,
                     i,
-                    reward_func_param=decay_consts_for_reward_funcs[i],
+                    reward_func_param=decay_consts_for_reward_funcs[i] if active else 0.0,
                 )
             )
 
