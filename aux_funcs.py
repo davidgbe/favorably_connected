@@ -5,6 +5,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 import warnings
+import pickle
+import blosc
 
 
 def zero_pad(s, n):
@@ -127,3 +129,17 @@ def colored_line(x, y, c, ax, **lc_kwargs):
     lc.set_array(c)  # set the colors of each segment
 
     return ax.add_collection(lc)
+
+
+def compressed_write(data, dest):
+    pickled_data = pickle.dumps(data)
+    compressed_pickle = blosc.compress(pickled_data)
+    with open(dest, 'wb') as f:
+        f.write(compressed_pickle)
+
+
+def compressed_read(source):
+    with open(source, 'rb') as f:
+        compressed_pickle = f.read()
+    inflated_pickle = blosc.decompress(compressed_pickle)
+    return pickle.loads(inflated_pickle)

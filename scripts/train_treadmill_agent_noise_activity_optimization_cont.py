@@ -59,18 +59,19 @@ LEARNING_RATE = 1e-4 #0.0006006712322528219
 
 # TRAINING PARAMS
 NUM_ENVS = 30
-N_SESSIONS = 10000
+N_SESSIONS = 5000
 N_UPDATES_PER_SESSION = 100
 N_STEPS_PER_UPDATE = 200
 
 # OTHER PARMS
 DEVICE = 'cuda'
-OUTPUT_STATE_SAVE_RATE = 50 # save one in 10 sessions
+OUTPUT_STATE_SAVE_RATE = 50 # save one in 50 sessions
 OUTPUT_BASE_DIR = './data/rl_agent_outputs'
 
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
 parser.add_argument('--exp_title', metavar='et', type=str)
+parser.add_argument('--load_path', metavar='lp', type=str)
 args = parser.parse_args()
 
 
@@ -198,10 +199,11 @@ def objective(trial, var_noise, activity_weight):
         var_noise=var_noise,
     )
 
+    network.load_state_dict(torch.load(args.load_path, weights_only=True))
+
     curricum = Curriculum(
-        curriculum_step_starts=[0, 20],
+        curriculum_step_starts=[0],
         curriculum_step_env_funcs=[
-            make_deterministic_treadmill_environment,
             make_stochastic_treadmill_environment,
         ],
     )
