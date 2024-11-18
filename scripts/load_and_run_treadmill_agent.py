@@ -65,7 +65,7 @@ N_STEPS_PER_UPDATE = 200
 
 # OTHER PARMS
 DEVICE = 'cuda'
-OUTPUT_STATE_SAVE_RATE = 50 # save one in 50 sessions
+OUTPUT_STATE_SAVE_RATE = 1 # save every session
 OUTPUT_BASE_DIR = './data/rl_agent_outputs'
 
 # PARSE ARGUMENTS
@@ -174,9 +174,11 @@ def objective(trial, var_noise, activity_weight):
     reward_rates_output_dir = os.path.join(output_dir, 'reward_rates')
     info_output_dir = os.path.join(output_dir, 'state')
     weights_output_dir = os.path.join(output_dir, 'rnn_weights')
+    hidden_state_output_dir = os.path.join(output_dir, 'hidden_state')
     make_path_if_not_exists(reward_rates_output_dir)
     make_path_if_not_exists(info_output_dir)
     make_path_if_not_exists(weights_output_dir)
+    make_path_if_not_exists(hidden_state_output_dir)
 
     if trial is not None:
         gamma = trial.suggest_float('gamma', 0.9, 1.0)
@@ -244,13 +246,18 @@ def objective(trial, var_noise, activity_weight):
                     all_info.append(info)
 
                 avg_rewards_per_update[:, update_num] = np.mean(total_rewards, axis=1)
+            
+            hidden_states_for_session = agent.get_hidden_state_activities().cpu()
 
             padded_save_num = zero_pad(str(save_num), 5)
             np.save(os.path.join(reward_rates_output_dir, f'{padded_save_num}.npy'), avg_rewards_per_update)
+
             if session_num % OUTPUT_STATE_SAVE_RATE == 0 and session_num > 0:
                 try:
                     compressed_write(all_info, os.path.join(info_output_dir, f'{padded_save_num}.pkl'))
                     torch.save(network.state_dict(), os.path.join(weights_output_dir, f'{padded_save_num}.h5'))
+                    np.save(os.path.join(hidden_state_output_dir, f'{padded_save_num}.npy'), hidden_states_for_session)
+
                 except MemoryError as me:
                     print('Pickle dump caused memory crash')
                     print(me)
