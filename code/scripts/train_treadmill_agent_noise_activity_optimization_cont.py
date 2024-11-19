@@ -22,9 +22,18 @@ import multiprocessing as mp
 import pickle
 from copy import deepcopy as copy
 import tracemalloc
+from load_env import get_env_vars
 
 # tracemalloc.start()
 
+# PARSE ARGUMENTS
+parser = argparse.ArgumentParser()
+parser.add_argument('--exp_title', metavar='et', type=str)
+parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
+args = parser.parse_args()
+
+# GET MACHINE ENV VARS
+env_vars = get_env_vars(args.env)
 
 # ENVIRONEMENT PARAMS
 PATCH_TYPES_PER_ENV = 3
@@ -48,30 +57,16 @@ ENTROPY_WEIGHT = 1.0158892869509133e-06
 GAMMA = 0.9867118269299845
 LEARNING_RATE = 1e-4 #0.0006006712322528219
 
-'''
-{
-    'gamma': 0.9867118269299845,
-    'learning_rate': 0.0006006712322528219,
-    'critic_weight': 0.07846647668470078,
-    'entropy_weight': 1.0158892869509133e-06
-}
-'''
-
 # TRAINING PARAMS
 NUM_ENVS = 30
-N_SESSIONS = 10000
+N_SESSIONS = 5000
 N_UPDATES_PER_SESSION = 100
 N_STEPS_PER_UPDATE = 200
 
 # OTHER PARMS
 DEVICE = 'cuda'
 OUTPUT_STATE_SAVE_RATE = 50 # save one in 10 sessions
-OUTPUT_BASE_DIR = './data/rl_agent_outputs'
-
-# PARSE ARGUMENTS
-parser = argparse.ArgumentParser()
-parser.add_argument('--exp_title', metavar='et', type=str)
-args = parser.parse_args()
+OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
 
 
 
@@ -198,10 +193,11 @@ def objective(trial, var_noise, activity_weight):
         var_noise=var_noise,
     )
 
+    network.load_state_dict(torch.load(args.load_path, weights_only=True))
+
     curricum = Curriculum(
-        curriculum_step_starts=[0, 20],
+        curriculum_step_starts=[0],
         curriculum_step_env_funcs=[
-            make_deterministic_treadmill_environment,
             make_stochastic_treadmill_environment,
         ],
     )
