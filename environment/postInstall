@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -e
+
+conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia -y
