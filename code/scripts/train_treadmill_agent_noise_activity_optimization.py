@@ -10,7 +10,7 @@ import os
 import gymnasium as gym
 from tqdm.auto import trange
 from environments.treadmill_session import TreadmillSession
-from environments.components.patch import Patch
+from environments.components.patch_type import PatchType
 from environments.curriculum import Curriculum
 from agents.networks.a2c_rnn import A2CRNN
 from agents.a2c_recurrent_agent import A2CRecurrentAgent
@@ -36,10 +36,9 @@ env_vars = get_env_vars(args.env)
 
 # ENVIRONEMENT PARAMS
 PATCH_TYPES_PER_ENV = 3
-OBS_SIZE = PATCH_TYPES_PER_ENV + 2
+OBS_SIZE = PATCH_TYPES_PER_ENV + 1
 ACTION_SIZE = 2
 DWELL_TIME_FOR_REWARD = 6
-SPATIAL_BUFFER_FOR_VISUAL_CUES = 1.5
 MAX_REWARD_SITE_LEN = 2
 MIN_REWARD_SITE_LEN = 2
 MAX_N_REWARD_SITES_PER_PATCH = 16
@@ -64,7 +63,7 @@ N_STEPS_PER_UPDATE = 200
 
 # OTHER PARMS
 DEVICE = 'cuda'
-OUTPUT_STATE_SAVE_RATE = 50 # save one in 10 sessions
+OUTPUT_STATE_SAVE_RATE = 1 # save one in 10 sessions
 OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
 
 
@@ -78,13 +77,12 @@ def make_deterministic_treadmill_environment(env_idx):
 
         print('Begin det. treadmill')
 
-        patches = []
+        patch_types = []
         for i in range(PATCH_TYPES_PER_ENV):
             def reward_func(site_idx):
                 return 1
-            patches.append(
-                Patch(
-                    n_reward_sites_for_patches[i],
+            patch_types.append(
+                PatchType(
                     reward_site_len_for_patches[i],
                     INTERREWARD_SITE_LEN_MEAN,
                     reward_func,
@@ -96,12 +94,11 @@ def make_deterministic_treadmill_environment(env_idx):
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
         sesh = TreadmillSession(
-            patches,
+            patch_types,
             transition_mat,
             INTERPATCH_LEN,
             DWELL_TIME_FOR_REWARD,
-            SPATIAL_BUFFER_FOR_VISUAL_CUES,
-            obs_size=PATCH_TYPES_PER_ENV + 2,
+            obs_size=PATCH_TYPES_PER_ENV + 1,
             verbosity=False,
         )
 
@@ -123,7 +120,7 @@ def make_stochastic_treadmill_environment(env_idx):
         print('Begin stoch. treadmill')
         print(decay_consts_for_reward_funcs)
 
-        patches = []
+        patch_types = []
         for i in range(PATCH_TYPES_PER_ENV):
             decay_const_for_i = decay_consts_for_reward_funcs[i]
             active = (decay_const_for_i != 0)
@@ -133,9 +130,8 @@ def make_stochastic_treadmill_environment(env_idx):
                     return 1
                 else:
                     return 0
-            patches.append(
-                Patch(
-                    n_reward_sites_for_patches[i],
+            patch_types.append(
+                PatchType(
                     reward_site_len_for_patches[i],
                     INTERREWARD_SITE_LEN_MEAN,
                     reward_func,
@@ -147,12 +143,11 @@ def make_stochastic_treadmill_environment(env_idx):
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
         sesh = TreadmillSession(
-            patches,
+            patch_types,
             transition_mat,
             INTERPATCH_LEN,
             DWELL_TIME_FOR_REWARD,
-            SPATIAL_BUFFER_FOR_VISUAL_CUES,
-            obs_size=PATCH_TYPES_PER_ENV + 2,
+            obs_size=PATCH_TYPES_PER_ENV + 1,
             verbosity=False,
         )
 

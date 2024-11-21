@@ -69,49 +69,6 @@ OUTPUT_STATE_SAVE_RATE = 50 # save one in 10 sessions
 OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
 
 
-
-def make_deterministic_treadmill_environment(env_idx):
-
-    def make_env():
-        np.random.seed(env_idx)
-        
-        n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
-        reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
-
-        print('Begin det. treadmill')
-
-        patches = []
-        for i in range(PATCH_TYPES_PER_ENV):
-            def reward_func(site_idx):
-                return 1
-            patches.append(
-                Patch(
-                    n_reward_sites_for_patches[i],
-                    reward_site_len_for_patches[i],
-                    INTERREWARD_SITE_LEN_MEAN,
-                    reward_func,
-                    i,
-                    reward_func_param=0.0,
-                )
-            )
-
-        transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
-
-        sesh = TreadmillSession(
-            patches,
-            transition_mat,
-            INTERPATCH_LEN,
-            DWELL_TIME_FOR_REWARD,
-            SPATIAL_BUFFER_FOR_VISUAL_CUES,
-            obs_size=PATCH_TYPES_PER_ENV + 2,
-            verbosity=False,
-        )
-
-        return sesh
-
-    return make_env
-
-
 def make_stochastic_treadmill_environment(env_idx):
 
     def make_env():
@@ -153,8 +110,7 @@ def make_stochastic_treadmill_environment(env_idx):
             transition_mat,
             INTERPATCH_LEN,
             DWELL_TIME_FOR_REWARD,
-            SPATIAL_BUFFER_FOR_VISUAL_CUES,
-            obs_size=PATCH_TYPES_PER_ENV + 2,
+            obs_size=PATCH_TYPES_PER_ENV + 1,
             verbosity=False,
         )
 
