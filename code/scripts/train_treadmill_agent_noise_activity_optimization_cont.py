@@ -29,6 +29,7 @@ from load_env import get_env_vars
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
 parser.add_argument('--exp_title', metavar='et', type=str)
+parser.add_argument('--load_path', metavar='lp', type=str)
 parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
 args = parser.parse_args()
 
@@ -59,7 +60,7 @@ LEARNING_RATE = 1e-4 #0.0006006712322528219
 
 # TRAINING PARAMS
 NUM_ENVS = 30
-N_SESSIONS = 5000
+N_SESSIONS = 10000
 N_UPDATES_PER_SESSION = 100
 N_STEPS_PER_UPDATE = 200
 
