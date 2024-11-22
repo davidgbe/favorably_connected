@@ -9,6 +9,7 @@ class PatchType:
         self.odor_num = odor_num
         self.reward_func_param = reward_func_param
 
+
     def generate_patch(self, patch_start):
         return Patch(
             patch_start,

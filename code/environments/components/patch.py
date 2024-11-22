@@ -18,17 +18,17 @@ class Patch:
         self.odor_num = odor_num
         self.reward_func_param = reward_func_param
 
-        self.current_reward_site_idx = 0
+        self.current_reward_site_idx = -1
         self.current_reward_site_bounds = None
         self.generate_reward_site()
 
 
     def generate_reward_site(self):
         interreward_site_len = 1 + np.random.poisson(lam=self.interreward_site_len_mean - 1)
+        self.current_reward_site_idx += 1
         if self.current_reward_site_idx == 0:
             rws_start = self.patch_start + interreward_site_len
         else:
-            self.current_reward_site_idx += 1
             rws_start = self.current_reward_site_bounds[1] + interreward_site_len
         self.current_reward_site_bounds = (rws_start, rws_start + self.reward_site_len)
         return self.current_reward_site_bounds, self.current_reward_site_idx

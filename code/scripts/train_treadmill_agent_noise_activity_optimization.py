@@ -41,8 +41,6 @@ ACTION_SIZE = 2
 DWELL_TIME_FOR_REWARD = 6
 MAX_REWARD_SITE_LEN = 2
 MIN_REWARD_SITE_LEN = 2
-MAX_N_REWARD_SITES_PER_PATCH = 16
-MIN_N_REWARD_SITES_PER_PATCH = 16
 INTERREWARD_SITE_LEN_MEAN = 2
 REWARD_DECAY_CONSTS = [0, 10, 30]
 REWARD_PROB_PREFACTOR = 0.8
@@ -63,7 +61,7 @@ N_STEPS_PER_UPDATE = 200
 
 # OTHER PARMS
 DEVICE = 'cuda'
-OUTPUT_STATE_SAVE_RATE = 1 # save one in 10 sessions
+OUTPUT_STATE_SAVE_RATE = 50 # save one in 10 sessions
 OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
 
 
@@ -72,7 +70,6 @@ def make_deterministic_treadmill_environment(env_idx):
     def make_env():
         np.random.seed(env_idx)
         
-        n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
         reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
 
         print('Begin det. treadmill')
@@ -112,7 +109,6 @@ def make_stochastic_treadmill_environment(env_idx):
     def make_env():
         np.random.seed(env_idx + NUM_ENVS)
         
-        n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
         reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
         decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
         np.random.shuffle(decay_consts_for_reward_funcs)
@@ -296,6 +292,6 @@ def objective(trial, var_noise, activity_weight):
 
 if __name__ == "__main__":
     
-    for var_noise in [0]:
-        for activity_weight in [0]:
+    for var_noise in [1e-4]:
+        for activity_weight in [10]:
             print(objective(None, var_noise, activity_weight))

@@ -86,7 +86,10 @@ class TreadmillSession(gym.Env):
 
     def is_position_in_current_patch(self, pos):
         current_patch_bounds = self.current_patch.get_bounds()
-        return (pos >= current_patch_bounds[0] and pos < current_patch_bounds[1])
+        if self.current_reward_site_attempted and pos >= current_patch_bounds[0]:
+            return True
+        else:
+            return (pos >= current_patch_bounds[0] and pos < current_patch_bounds[1])
 
 
     def is_agent_in_current_patch(self):
@@ -109,15 +112,15 @@ class TreadmillSession(gym.Env):
     def move_forward(self, dist):
         self.wprint()
         old_position = self.current_position
-        agent_was_out_of_patch = ~self.is_position_in_current_patch(old_position)
         self.current_position += dist
 
         self.wprint(f'Position is {self.current_position}')
+        self.wprint(f'Last position was {old_position}')
 
         immediate_reward = 0
 
         if self.is_agent_in_current_patch(): # if agent is currently in a patch
-            if agent_was_out_of_patch:
+            if not self.is_position_in_current_patch(old_position):
                 self.wprint('Agent has entered a patch')
                 # visual cue given
 
@@ -139,6 +142,9 @@ class TreadmillSession(gym.Env):
                 self.wprint('Agent has left reward site')
                 if self.current_reward_site_attempted:
                     self.current_patch.generate_reward_site()
+                    self.wprint('New reward site generated')
+                    rwsb = self.current_patch.current_reward_site_bounds
+                    self.wprint(f'[{rwsb[0]}, {rwsb[1]}]')
                 else:
                     # patch is quit!
                     new_patch_start = self.current_patch.current_reward_site_bounds[-1][1] + self.interpatch_len
@@ -181,9 +187,11 @@ class TreadmillSession(gym.Env):
             patch_start = self.current_patch.current_reward_site_bounds[1] + self.interpatch_len
         self.current_patch = self.current_patch_type.generate_patch(patch_start)
 
-        # self.wprint(f'New patch created!')
-        # self.wprint(f'Patch bounds are [{self.current_patch_bounds[0]}, {self.current_patch_bounds[1]}]')
-        # self.wprint('Current reward bounds are:')
+        self.wprint(f'New patch created!')
+        pb = self.current_patch.get_bounds()
+        self.wprint(f'Patch bounds are [{pb[0]}, {pb[1]}]')
+        rwsb = self.current_patch.current_reward_site_bounds
+        self.wprint(f'Current reward bounds are: [{rwsb[0]}, {rwsb[1]}]')
         # for k in range(len(self.reward_bounds)):
         #     self.wprint(f'[{self.reward_bounds[k][0]}, {self.reward_bounds[k][1]}]')
 
