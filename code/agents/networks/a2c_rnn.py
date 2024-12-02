@@ -30,15 +30,23 @@ class A2CRNN(nn.Module):
         self.hidden_size = hidden_size
         self.input_size = input_size
         self.device = device
-        self.rnn = nn.GRUCell(
-            input_size=self.input_size, 
-            hidden_size=hidden_size,
-        ).to(device)
+        self.rnn = self.initialize_internal_structure(input_size, hidden_size).to(device)
         self.action_arm = nn.Linear(hidden_size, action_size).to(device)
         self.value_arm = nn.Linear(hidden_size, 1).to(device)
         # hidden states of [n_layers, n_envs, hidden_size]
         self.hidden_states = None
         self.var_noise = var_noise
+
+    def initialize_internal_structure(self, input_size, hidden_size, form='line'):
+        rnn = nn.GRUCell(
+            input_size=input_size, 
+            hidden_size=hidden_size,
+        )
+
+        # todo
+        
+        return rnn
+
     
     def reset_state(self):
         hidden_states = self.hidden_states.detach().cpu()
