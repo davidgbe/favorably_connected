@@ -10,7 +10,7 @@ import os
 import gymnasium as gym
 from tqdm.auto import trange
 from environments.treadmill_session import TreadmillSession
-from environments.components.patch import Patch
+from environments.components.patch_type import PatchType
 from environments.curriculum import Curriculum
 from agents.networks.a2c_rnn import A2CRNN
 from agents.a2c_recurrent_agent import A2CRecurrentAgent
@@ -24,12 +24,14 @@ from copy import deepcopy as copy
 import tracemalloc
 from load_env import get_env_vars
 
-# tracemalloc.start()
 
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
 parser.add_argument('--exp_title', metavar='et', type=str)
 parser.add_argument('--load_path', metavar='lp', type=str)
+parser.add_argument('--noise_var', metavar='nv', type=float, default=0)
+parser.add_argument('--activity_reg', metavar='ar', type=float, default=0)
+parser.add_argument('--curr_style', metavar='cs', type=str, default='MIXED')
 parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
 args = parser.parse_args()
 
@@ -38,18 +40,16 @@ env_vars = get_env_vars(args.env)
 
 # ENVIRONEMENT PARAMS
 PATCH_TYPES_PER_ENV = 3
-OBS_SIZE = PATCH_TYPES_PER_ENV + 2
+OBS_SIZE = PATCH_TYPES_PER_ENV + 1
 ACTION_SIZE = 2
 DWELL_TIME_FOR_REWARD = 6
-SPATIAL_BUFFER_FOR_VISUAL_CUES = 1.5
 MAX_REWARD_SITE_LEN = 2
 MIN_REWARD_SITE_LEN = 2
-MAX_N_REWARD_SITES_PER_PATCH = 16
-MIN_N_REWARD_SITES_PER_PATCH = 16
 INTERREWARD_SITE_LEN_MEAN = 2
 REWARD_DECAY_CONSTS = [0, 10, 30]
 REWARD_PROB_PREFACTOR = 0.8
 INTERPATCH_LEN = 6
+CURRICULUM_STYLE = args.curr_style
 
 # AGENT PARAMS
 HIDDEN_SIZE = 128
@@ -68,6 +68,46 @@ N_STEPS_PER_UPDATE = 200
 DEVICE = 'cuda'
 OUTPUT_STATE_SAVE_RATE = 50 # save one in 10 sessions
 OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
+DATA_BASE_DIR = env_vars['DATA_PATH']
+
+
+def make_deterministic_treadmill_environment(env_idx):
+
+    def make_env():
+        np.random.seed(env_idx)
+        
+        reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
+
+        print('Begin det. treadmill')
+
+        patch_types = []
+        for i in range(PATCH_TYPES_PER_ENV):
+            def reward_func(site_idx):
+                return 1
+            patch_types.append(
+                PatchType(
+                    reward_site_len_for_patches[i],
+                    INTERREWARD_SITE_LEN_MEAN,
+                    reward_func,
+                    i,
+                    reward_func_param=0.0,
+                )
+            )
+
+        transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
+
+        sesh = TreadmillSession(
+            patch_types,
+            transition_mat,
+            INTERPATCH_LEN,
+            DWELL_TIME_FOR_REWARD,
+            obs_size=PATCH_TYPES_PER_ENV + 1,
+            verbosity=False,
+        )
+
+        return sesh
+
+    return make_env
 
 
 def make_stochastic_treadmill_environment(env_idx):
@@ -75,15 +115,15 @@ def make_stochastic_treadmill_environment(env_idx):
     def make_env():
         np.random.seed(env_idx + NUM_ENVS)
         
-        n_reward_sites_for_patches = np.random.randint(MIN_N_REWARD_SITES_PER_PATCH, high=MAX_N_REWARD_SITES_PER_PATCH + 1, size=(PATCH_TYPES_PER_ENV,))
         reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
         decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
-        np.random.shuffle(decay_consts_for_reward_funcs)
+        if CURRICULUM_STYLE == 'MIXED':
+            np.random.shuffle(decay_consts_for_reward_funcs)
 
         print('Begin stoch. treadmill')
         print(decay_consts_for_reward_funcs)
 
-        patches = []
+        patch_types = []
         for i in range(PATCH_TYPES_PER_ENV):
             decay_const_for_i = decay_consts_for_reward_funcs[i]
             active = (decay_const_for_i != 0)
@@ -93,9 +133,8 @@ def make_stochastic_treadmill_environment(env_idx):
                     return 1
                 else:
                     return 0
-            patches.append(
-                Patch(
-                    n_reward_sites_for_patches[i],
+            patch_types.append(
+                PatchType(
                     reward_site_len_for_patches[i],
                     INTERREWARD_SITE_LEN_MEAN,
                     reward_func,
@@ -107,7 +146,7 @@ def make_stochastic_treadmill_environment(env_idx):
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
         sesh = TreadmillSession(
-            patches,
+            patch_types,
             transition_mat,
             INTERPATCH_LEN,
             DWELL_TIME_FOR_REWARD,
@@ -150,7 +189,9 @@ def objective(trial, var_noise, activity_weight):
         var_noise=var_noise,
     )
 
-    network.load_state_dict(torch.load(args.load_path, weights_only=True))
+    network.load_state_dict(
+        torch.load(os.path.join(DATA_BASE_DIR, args.load_path), weights_only=True)
+    )
 
     curricum = Curriculum(
         curriculum_step_starts=[0],
@@ -211,6 +252,7 @@ def objective(trial, var_noise, activity_weight):
 
         padded_save_num = zero_pad(str(save_num), 5)
         np.save(os.path.join(reward_rates_output_dir, f'{padded_save_num}.npy'), avg_rewards_per_update)
+        print('Avg reward for session:', np.mean(avg_rewards_per_update))
         if session_num % OUTPUT_STATE_SAVE_RATE == 0 and session_num > 0:
             try:
                 compressed_write(all_info, os.path.join(info_output_dir, f'{padded_save_num}.pkl'))
@@ -260,7 +302,4 @@ def objective(trial, var_noise, activity_weight):
     return final_value
 
 if __name__ == "__main__":
-    
-    for var_noise in [0]:
-        for activity_weight in [0]:
-            print(objective(None, var_noise, activity_weight))
+    print(objective(None, args.noise_var, args.activity_reg))
