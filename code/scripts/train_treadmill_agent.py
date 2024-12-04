@@ -59,7 +59,7 @@ LEARNING_RATE = 1e-4 #0.0006006712322528219
 
 # TRAINING PARAMS
 NUM_ENVS = 30
-N_SESSIONS = 10000
+N_SESSIONS = 20000
 N_UPDATES_PER_SESSION = 100
 N_STEPS_PER_UPDATE = 200
 
@@ -187,6 +187,8 @@ def objective(trial, var_noise, activity_weight):
         var_noise=var_noise,
     )
 
+    optimizer = torch.optim.RMSprop(network.parameters(), lr=learning_rate)
+
     curricum = Curriculum(
         curriculum_step_starts=[0, 20],
         curriculum_step_env_funcs=[
@@ -211,6 +213,7 @@ def objective(trial, var_noise, activity_weight):
             gamma=gamma, # changed for Optuna
             learning_rate=learning_rate, # changed for Optuna
             activity_weight=activity_weight,
+            optimizer=optimizer,
         )
 
         total_losses = np.empty((N_UPDATES_PER_SESSION))
@@ -251,7 +254,13 @@ def objective(trial, var_noise, activity_weight):
         if session_num % OUTPUT_STATE_SAVE_RATE == 0 and session_num > 0:
             try:
                 compressed_write(all_info, os.path.join(info_output_dir, f'{padded_save_num}.pkl'))
-                torch.save(network.state_dict(), os.path.join(weights_output_dir, f'{padded_save_num}.h5'))
+                torch.save(
+                    {
+                        'network_state_dict': network.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                    },
+                    os.path.join(weights_output_dir, f'{padded_save_num}.pth')
+                )
             except MemoryError as me:
                 print('Pickle dump caused memory crash')
                 print(me)

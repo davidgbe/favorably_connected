@@ -189,9 +189,11 @@ def objective(trial, var_noise, activity_weight):
         var_noise=var_noise,
     )
 
-    network.load_state_dict(
-        torch.load(os.path.join(DATA_BASE_DIR, args.load_path), weights_only=True)
-    )
+    saved_checkpoint = torch.load(os.path.join(DATA_BASE_DIR, args.load_path).replace('\\','/'), weights_only=True)
+    network.load_state_dict(saved_checkpoint['network_state_dict'])
+
+    optimizer = torch.optim.RMSprop(network.parameters(), lr=learning_rate)
+    optimizer.load_state_dict(saved_checkpoint['optimizer_state_dict'])
 
     curricum = Curriculum(
         curriculum_step_starts=[0],
@@ -216,6 +218,7 @@ def objective(trial, var_noise, activity_weight):
             gamma=gamma, # changed for Optuna
             learning_rate=learning_rate, # changed for Optuna
             activity_weight=activity_weight,
+            optimizer=optimizer,
         )
 
         total_losses = np.empty((N_UPDATES_PER_SESSION))
@@ -256,7 +259,13 @@ def objective(trial, var_noise, activity_weight):
         if session_num % OUTPUT_STATE_SAVE_RATE == 0 and session_num > 0:
             try:
                 compressed_write(all_info, os.path.join(info_output_dir, f'{padded_save_num}.pkl'))
-                torch.save(network.state_dict(), os.path.join(weights_output_dir, f'{padded_save_num}.h5'))
+                torch.save(
+                    {
+                        'network_state_dict': network.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                    },
+                    os.path.join(weights_output_dir, f'{padded_save_num}.h5')
+                )
             except MemoryError as me:
                 print('Pickle dump caused memory crash')
                 print(me)

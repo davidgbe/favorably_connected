@@ -10,7 +10,7 @@ class A2CRecurrentAgent:
     Implementation adapted from: https://gymnasium.farama.org/tutorials/gymnasium_basics/vector_envs_tutorial/
     """
     def __init__(self, network, action_space_dims, n_envs, device="cpu", activity_weight=0,
-                 critic_weight=0.05, entropy_weight=0.05, learning_rate=7e-4, gamma=0.9):
+                 critic_weight=0.05, entropy_weight=0.05, learning_rate=7e-4, gamma=0.9, optimizer=None):
         """
         Initializes recurrent agent: 
         Default values from Wang et al 2018
@@ -40,7 +40,10 @@ class A2CRecurrentAgent:
         self.actions = []
         self.activities = []
 
-        self.optimizer = torch.optim.RMSprop(self.net.parameters(), lr=self.learning_rate)
+        if optimizer is None:
+            self.optimizer = torch.optim.RMSprop(self.net.parameters(), lr=self.learning_rate)
+        else:
+            self.optimizer = optimizer
 
     
     def sample_action(self, observations):
