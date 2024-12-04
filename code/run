@@ -2,4 +2,4 @@
 set -ex
 
 # This is the master script for the capsule. When you click "Reproducible Run", the code in this file will execute.
-bash main.sh "$@"
+bash cont_vanilla_low_noise_02.sh "$@"
