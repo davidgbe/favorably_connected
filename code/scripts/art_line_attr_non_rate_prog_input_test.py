@@ -17,6 +17,9 @@ import pickle
 from copy import deepcopy as copy
 import tracemalloc
 from load_env import get_env_vars
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+
 
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
@@ -30,11 +33,17 @@ env_vars = get_env_vars(args.env)
 OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'line_attr_supervised')
 OUTPUT_SAVE_RATE = 1
 
-HIDDEN_SIZE = 4
+HIDDEN_SIZE = 32
 INPUT_SIZE = 1
 DEVICE = 'cuda'
-VAR_NOISE = 1e-4
+VAR_NOISE = 0 #1e-4
 ACTIVITY_WEIGHT = 1e-7
+
+ATTR_POOL_E_SIZE = 16
+ATTR_POOL_I_SIZE = 4
+ATTR_POOL_W_EE = 1 / np.sqrt(HIDDEN_SIZE)
+ATTR_POOL_W_EI = 1 / np.sqrt(HIDDEN_SIZE)
+ATTR_POOL_W_IE = -1 / np.sqrt(HIDDEN_SIZE)
 
 
 def gen_progressive_input(batch_size, t):
@@ -63,8 +72,30 @@ if __name__ == '__main__':
         var_noise=VAR_NOISE,
     )
 
-    load_path = './results/line_attr_supervised/5_unit_line_2024-12-04_14_05_12_930912_var_noise_0.0001_activity_weight_1e-07/rnn_weights/009999.h5'
-    network.load_state_dict(torch.load(load_path, weights_only=True))
+    w_line_attr = np.zeros((ATTR_POOL_E_SIZE + ATTR_POOL_I_SIZE, ATTR_POOL_E_SIZE + ATTR_POOL_I_SIZE))
+
+    x = np.arange(ATTR_POOL_E_SIZE) / ATTR_POOL_E_SIZE
+    connectivity_scale = 0.075
+    exp_ring_connectivity = 4 * ATTR_POOL_W_EE * (np.exp(-x/connectivity_scale) + np.exp((x-1)/connectivity_scale))
+    
+    for r_idx in np.arange(ATTR_POOL_E_SIZE):
+        w_line_attr[r_idx:ATTR_POOL_E_SIZE, r_idx] = exp_ring_connectivity[:(ATTR_POOL_E_SIZE - r_idx)]
+        w_line_attr[0:r_idx, r_idx] = exp_ring_connectivity[(ATTR_POOL_E_SIZE - r_idx):]
+        
+    w_line_attr[-ATTR_POOL_I_SIZE:, :ATTR_POOL_E_SIZE] = np.random.normal(size=(ATTR_POOL_I_SIZE, ATTR_POOL_E_SIZE), loc=ATTR_POOL_W_EI, scale=0.1 * ATTR_POOL_W_EI)
+    w_line_attr[:ATTR_POOL_E_SIZE, -ATTR_POOL_I_SIZE:] = np.random.normal(size=(ATTR_POOL_E_SIZE, ATTR_POOL_I_SIZE), loc=ATTR_POOL_W_IE, scale=0.1 * np.abs(ATTR_POOL_W_IE))
+
+    network.rnn.weight_hh.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_E_SIZE + ATTR_POOL_I_SIZE, : ATTR_POOL_E_SIZE + ATTR_POOL_I_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
+
+    scale = 10
+    fig, axs = plt.subplots(1, 3, figsize=(4 * scale, 1 * scale))
+
+    weight_hh = network.rnn.weight_hh.data.clone().detach().cpu().numpy()
+    m = np.max(np.abs(weight_hh))
+    for k in range(3):
+        cbar = axs[k].matshow(weight_hh[k * HIDDEN_SIZE:(k+1) * HIDDEN_SIZE, :], vmin=-m, vmax=m, cmap='bwr')
+        plt.colorbar(cbar)
+    fig.savefig(os.path.join(output_dir, f'weights.png'))
 
     losses = np.empty((OUTPUT_SAVE_RATE))
 

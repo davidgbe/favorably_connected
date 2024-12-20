@@ -30,7 +30,7 @@ env_vars = get_env_vars(args.env)
 OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'line_attr_supervised')
 OUTPUT_SAVE_RATE = 1
 
-HIDDEN_SIZE = 32
+HIDDEN_SIZE = 4
 INPUT_SIZE = 1
 DEVICE = 'cuda'
 VAR_NOISE = 1e-4
@@ -68,13 +68,14 @@ if __name__ == '__main__':
         var_noise=VAR_NOISE,
     )
 
-    load_path = './results/line_attr_supervised/test_2024-11-28_15_48_56_780557_var_noise_0.0001_activity_weight_1e-07/rnn_weights/009999.h5'
+    load_path = './results/line_attr_supervised/5_unit_line_2024-12-04_14_05_12_930912_var_noise_0.0001_activity_weight_1e-07/rnn_weights/009999.h5'
     network.load_state_dict(torch.load(load_path, weights_only=True))
+    network.eval()
 
     losses = np.empty((OUTPUT_SAVE_RATE))
 
     with torch.no_grad():
-        for k in trange(5):
+        for k in trange(20):
             p_on = np.random.rand() * 0.05
             p_off = np.random.rand() * 0.05
             transition_mat = np.array([

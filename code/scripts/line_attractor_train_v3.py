@@ -22,35 +22,33 @@ from load_env import get_env_vars
 parser = argparse.ArgumentParser()
 parser.add_argument('--exp_title', metavar='et', type=str)
 parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
+parser.add_argument('--hidden_size', metavar='hs', type=int, default=32)
 args = parser.parse_args()
 
 # GET MACHINE ENV VARS
 env_vars = get_env_vars(args.env)
 
 OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'line_attr_supervised')
-OUTPUT_SAVE_RATE = 100
+OUTPUT_SAVE_RATE = 1000
 
-HIDDEN_SIZE = 4
+HIDDEN_SIZE = args.hidden_size
 INPUT_SIZE = 1
 DEVICE = 'cuda'
-LEARNING_RATE = 1e-3
-VAR_NOISE = 1e-4
+LEARNING_RATE = 2e-4
+VAR_NOISE = 0.5e-4
 ACTIVITY_WEIGHT = 1e-7
 
+T = 500
+DECODING_PERIOD = 200
+BATCH_SIZE = 100
 
-def sample_from_markov_process(batch_size, t, transition_mat):
+
+def sample_random_walks(batch_size, t, input_len, p_vec):
     # create (batch_size, t) mat
-    markov_trajectories = np.zeros((batch_size, t)).astype(int)
-    # sample for t successive states
-    for k in range(t-1):
-        state = markov_trajectories[:, k]
-        p_transitions = transition_mat[state, :]
-        markov_trajectories[:, k+1] = np.stack([
-            np.random.choice(np.arange(transition_mat.shape[0]), p=p_transition)
-            for p_transition in p_transitions
-        ])
-
-    return torch.from_numpy(markov_trajectories.reshape(batch_size, 1, t)).float()
+    trajectories = np.zeros((batch_size, t))
+    p = p_vec.reshape(batch_size, 1) * np.ones((batch_size, input_len))
+    trajectories[:, :input_len] = np.where(np.random.rand(batch_size, input_len) < p, 1, 0)
+    return torch.from_numpy(trajectories.reshape(batch_size, 1, t)).float()
 
 if __name__ == '__main__':
     time_stamp = str(datetime.now()).replace(' ', '_').replace(':', '_').replace('.', '_')
@@ -59,8 +57,6 @@ if __name__ == '__main__':
     weights_output_dir = os.path.join(output_dir, 'rnn_weights')
     make_path_if_not_exists(loss_output_dir)
     make_path_if_not_exists(weights_output_dir)
-
-    t = 1000
 
     network = GRU_RNN(
         input_size=INPUT_SIZE,
@@ -72,21 +68,21 @@ if __name__ == '__main__':
     optimizer = torch.optim.RMSprop(network.parameters(), lr=LEARNING_RATE)
     losses = np.empty((OUTPUT_SAVE_RATE))
 
-    for k in trange(10000):
-        p_on = np.random.rand() * 0.05
-        p_off = np.random.rand() * 0.05
-        transition_mat = np.array([
-            [1 - p_on, p_on],
-            [p_off, 1 - p_off],
-        ])
-
-        inputs = sample_from_markov_process(100, t, transition_mat).detach().to(DEVICE)
-        target_outputs = torch.sum(inputs, dim=2) / t
+    for k in trange(200000):
+        p_on = np.random.rand((BATCH_SIZE))
+    
+        inputs = sample_random_walks(BATCH_SIZE, T, T - DECODING_PERIOD, p_on).detach().to(DEVICE)
+        target_outputs = torch.sum(inputs, dim=2) / T
         optimizer.zero_grad()
-        outputs, activity = network(inputs)
-        print('output:', outputs)
+        outputs, activity = network(inputs, output_steps=DECODING_PERIOD)
+        print(outputs)
+        indices = torch.from_numpy(np.arange(BATCH_SIZE)).to(DEVICE)
+        rand_times = torch.from_numpy(np.random.rand(BATCH_SIZE) * DECODING_PERIOD).int().to(DEVICE)
+        sampled_outputs = outputs[indices, rand_times]
+
+        print('output:', sampled_outputs)
         print('target:', target_outputs.squeeze(1))
-        loss = torch.pow(target_outputs.squeeze(1) - outputs, 2).mean() + ACTIVITY_WEIGHT * activity.pow(2).sum().mean()
+        loss = torch.pow(target_outputs.squeeze(1) - sampled_outputs, 2).mean() + ACTIVITY_WEIGHT * activity.pow(2).sum().mean()
         print(network.rnn.weight_hh.pow(2).sum().pow(0.5))
         print('loss:', loss)
         print('act_pen', ACTIVITY_WEIGHT * activity.pow(2).sum().mean())

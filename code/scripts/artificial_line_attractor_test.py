@@ -37,12 +37,17 @@ VAR_NOISE = 1e-4
 ACTIVITY_WEIGHT = 1e-7
 
 
-def gen_progressive_input(batch_size, t):
+def sample_from_markov_process(batch_size, t, transition_mat):
     # create (batch_size, t) mat
     markov_trajectories = np.zeros((batch_size, t)).astype(int)
     # sample for t successive states
-    for k in range(batch_size):
-        markov_trajectories[k, :int(k / batch_size * t)] = 1
+    for k in range(t-1):
+        state = markov_trajectories[:, k]
+        p_transitions = transition_mat[state, :]
+        markov_trajectories[:, k+1] = np.stack([
+            np.random.choice(np.arange(transition_mat.shape[0]), p=p_transition)
+            for p_transition in p_transitions
+        ])
 
     return torch.from_numpy(markov_trajectories.reshape(batch_size, 1, t)).float()
 
@@ -63,14 +68,22 @@ if __name__ == '__main__':
         var_noise=VAR_NOISE,
     )
 
-    load_path = './results/line_attr_supervised/5_unit_line_2024-12-04_14_05_12_930912_var_noise_0.0001_activity_weight_1e-07/rnn_weights/009999.h5'
+    load_path = './results/line_attr_supervised/5_unit_line_2024-12-04_14_05_12_930912_var_noise_0.0001_activity_weight_1e-07/rnn_weights/002799.h5'
     network.load_state_dict(torch.load(load_path, weights_only=True))
+    network.eval()
 
     losses = np.empty((OUTPUT_SAVE_RATE))
 
     with torch.no_grad():
         for k in trange(20):
-            inputs = gen_progressive_input(100, t).detach().to(DEVICE)
+            p_on = np.random.rand() * 0.05
+            p_off = np.random.rand() * 0.05
+            transition_mat = np.array([
+                [1 - p_on, p_on],
+                [p_off, 1 - p_off],
+            ])
+
+            inputs = sample_from_markov_process(100, t, transition_mat).detach().to(DEVICE)
             target_outputs = torch.sum(inputs, dim=2) / t
             outputs, activity = network(inputs)
             print('output:', outputs)

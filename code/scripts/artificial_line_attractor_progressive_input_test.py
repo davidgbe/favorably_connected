@@ -33,7 +33,7 @@ OUTPUT_SAVE_RATE = 1
 HIDDEN_SIZE = 4
 INPUT_SIZE = 1
 DEVICE = 'cuda'
-VAR_NOISE = 1e-4
+VAR_NOISE = 0 #1e-4
 ACTIVITY_WEIGHT = 1e-7
 
 
@@ -63,8 +63,44 @@ if __name__ == '__main__':
         var_noise=VAR_NOISE,
     )
 
-    load_path = './results/line_attr_supervised/5_unit_line_2024-12-04_14_05_12_930912_var_noise_0.0001_activity_weight_1e-07/rnn_weights/009999.h5'
-    network.load_state_dict(torch.load(load_path, weights_only=True))
+    # print(network.rnn.bias_hh.size())
+    # print(network.rnn.weight_ih.size())
+    # print(network.rnn.bias_ih.size())
+
+    gamma_w_hh_n = 1.5
+    gamma_w_hh_z = 1
+    gamma_w_ih_n = 1
+
+    eig = np.ones((HIDDEN_SIZE, 1))
+    eig = eig / np.linalg.norm(eig)
+    w_ih_n = eig * gamma_w_ih_n
+    w_hh_n = eig * eig.T * gamma_w_hh_n
+    w_hh_z = np.outer(np.ones((HIDDEN_SIZE)), eig) * gamma_w_hh_z
+
+    network.rnn.weight_hh.data = torch.from_numpy(np.zeros((3 * HIDDEN_SIZE, HIDDEN_SIZE))).float().to(DEVICE)
+    network.rnn.weight_hh.data[2 * HIDDEN_SIZE : 3 * HIDDEN_SIZE, :] = torch.from_numpy(w_hh_n).float().to(DEVICE)
+    network.rnn.weight_hh.data[1 * HIDDEN_SIZE : 2 * HIDDEN_SIZE, :] = torch.from_numpy(w_hh_z).float().to(DEVICE)
+
+    network.rnn.weight_ih.data = torch.from_numpy(np.zeros((3 * HIDDEN_SIZE, 1))).float().to(DEVICE)
+    network.rnn.weight_ih.data[HIDDEN_SIZE : 2 * HIDDEN_SIZE] = torch.from_numpy(2 * np.ones((HIDDEN_SIZE, 1))).float().to(DEVICE)
+    network.rnn.weight_ih.data[2 * HIDDEN_SIZE : 3 * HIDDEN_SIZE, :] = torch.from_numpy(w_ih_n * gamma_w_ih_n).float().to(DEVICE)
+
+    network.rnn.bias_hh.data = torch.from_numpy(np.zeros((3 * HIDDEN_SIZE,))).float().to(DEVICE)
+    network.rnn.bias_ih.data = torch.from_numpy(np.zeros((3 * HIDDEN_SIZE,))).float().to(DEVICE)
+    network.rnn.bias_ih.data[HIDDEN_SIZE:2 *HIDDEN_SIZE] = torch.from_numpy(4 * np.ones((HIDDEN_SIZE,))).float().to(DEVICE)
+    # network.rnn.bias_ih.data[1 * HIDDEN_SIZE : 2 * HIDDEN_SIZE] = torch.from_numpy(1 * np.ones((HIDDEN_SIZE,))).float().to(DEVICE)
+
+    network.output_arm.weight.data = torch.from_numpy(eig.T).float().to(DEVICE)
+    network.output_arm.bias.data = torch.from_numpy(np.zeros(1,)).float().to(DEVICE)
+
+    print(network.rnn.weight_hh.data)
+    print(network.rnn.bias_hh.data)
+
+    print(network.rnn.weight_ih.data)
+    print(network.rnn.bias_ih.data)
+
+    print(np.linalg.eig(network.rnn.weight_hh.data.clone().cpu()[2 * HIDDEN_SIZE : 3 * HIDDEN_SIZE, :]))
+
 
     losses = np.empty((OUTPUT_SAVE_RATE))
 
@@ -94,5 +130,7 @@ if __name__ == '__main__':
             np.save(os.path.join(hidden_state_output_dir, f'{padded_save_num}.npy'), activity.clone().detach().cpu().numpy())
 
             network.reset_state()
+    
+    print(w_hh_n)
 
 

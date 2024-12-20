@@ -38,7 +38,8 @@ class GRU_RNN(nn.Module):
         self.hidden_states = self.hidden_states.to(self.device)
 
 
-    def forward(self, inputs):
+    def forward(self, inputs, output_steps=100):
+        output = torch.empty((inputs.shape[0], 1, output_steps)).to(self.device)
         all_hidden = torch.zeros([inputs.shape[0], self.hidden_size, inputs.shape[2]])
         for k in np.arange(inputs.shape[2]):
             # if self.hidden_states is None, it just defaults to zeros
@@ -53,5 +54,6 @@ class GRU_RNN(nn.Module):
             self.hidden_states = new_hidden_states
             all_hidden[..., k] = new_hidden_states
 
-        output = self.output_arm(new_hidden_states)
+            if k >= inputs.shape[2] - output_steps:
+                output[..., k - (inputs.shape[2] - output_steps)] = self.output_arm(new_hidden_states)
         return (output.squeeze(1), all_hidden)

@@ -28,17 +28,17 @@ args = parser.parse_args()
 env_vars = get_env_vars(args.env)
 
 OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'line_attr_supervised')
-OUTPUT_SAVE_RATE = 100
+OUTPUT_SAVE_RATE = 1000
 
-HIDDEN_SIZE = 4
+HIDDEN_SIZE = 32
 INPUT_SIZE = 1
 DEVICE = 'cuda'
-LEARNING_RATE = 1e-3
-VAR_NOISE = 1e-4
+LEARNING_RATE = 2e-4
+VAR_NOISE = 0.5e-4
 ACTIVITY_WEIGHT = 1e-7
 
 
-def sample_from_markov_process(batch_size, t, transition_mat):
+def sample_from_markov_process(batch_size, t, transition_mat, end_t):
     # create (batch_size, t) mat
     markov_trajectories = np.zeros((batch_size, t)).astype(int)
     # sample for t successive states
@@ -49,6 +49,8 @@ def sample_from_markov_process(batch_size, t, transition_mat):
             np.random.choice(np.arange(transition_mat.shape[0]), p=p_transition)
             for p_transition in p_transitions
         ])
+    for i, end_t_i in enumerate(end_t):
+        markov_trajectories[i, end_t_i:] = 0
 
     return torch.from_numpy(markov_trajectories.reshape(batch_size, 1, t)).float()
 
@@ -60,7 +62,8 @@ if __name__ == '__main__':
     make_path_if_not_exists(loss_output_dir)
     make_path_if_not_exists(weights_output_dir)
 
-    t = 1000
+    t = 500
+    batch_size = 100
 
     network = GRU_RNN(
         input_size=INPUT_SIZE,
@@ -72,15 +75,17 @@ if __name__ == '__main__':
     optimizer = torch.optim.RMSprop(network.parameters(), lr=LEARNING_RATE)
     losses = np.empty((OUTPUT_SAVE_RATE))
 
-    for k in trange(10000):
+    for k in trange(200000):
         p_on = np.random.rand() * 0.05
-        p_off = np.random.rand() * 0.05
+        p_off = np.random.rand() * 0.001
         transition_mat = np.array([
             [1 - p_on, p_on],
             [p_off, 1 - p_off],
         ])
 
-        inputs = sample_from_markov_process(100, t, transition_mat).detach().to(DEVICE)
+        end_t = ((0.75 * np.random.rand(batch_size) + 0.25) * t).astype(int)
+
+        inputs = sample_from_markov_process(batch_size, t, transition_mat, end_t).detach().to(DEVICE)
         target_outputs = torch.sum(inputs, dim=2) / t
         optimizer.zero_grad()
         outputs, activity = network(inputs)
