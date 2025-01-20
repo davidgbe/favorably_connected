@@ -143,3 +143,13 @@ def compressed_read(source):
         compressed_pickle = f.read()
     inflated_pickle = blosc.decompress(compressed_pickle)
     return pickle.loads(inflated_pickle)
+
+
+def logical_and(*args):
+    v = None
+    for i in range(len(args)):
+        if v is None:
+            v = args[i]
+        else:
+            v = np.logical_and(v, args[i])
+    return v

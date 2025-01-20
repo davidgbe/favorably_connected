@@ -14,6 +14,7 @@ class TreadmillSession(gym.Env):
         obs_size,
         verbosity=True,
         first_patch_start=None,
+        odor_lesioned=False,
     ):
         self.patch_types = patch_types
         self.current_patch = None
@@ -25,6 +26,7 @@ class TreadmillSession(gym.Env):
         self.set_verbosity(verbosity)
         self.step_vals = np.array([0, 1])
         self.start_new_session(first_patch_start)
+        self.odor_lesioned = odor_lesioned
         if type(obs_size) is not int:
             raise ValueError("'obs_size' must be an integer")
         if obs_size < len(patch_types):
@@ -209,8 +211,10 @@ class TreadmillSession(gym.Env):
             observations[0] = 1
         
         if self.get_reward_site_idx_of_current_pos() != -1:
-            observations[1 + self.current_patch.get_odor_num()] = 1
-        
+            if not self.odor_lesioned:
+                observations[1 + self.current_patch.get_odor_num()] = 1
+            else:
+                observations[1] = 1
         return observations
 
 

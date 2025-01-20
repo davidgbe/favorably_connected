@@ -162,9 +162,13 @@ def objective(trial):
     agent = GridSearchAgent(
         n_envs=NUM_ENVS,
         wait_time_for_reward=DWELL_TIME_FOR_REWARD - MIN_REWARD_SITE_LEN,
-        odor_cues_indices=(2, 5),
+        odor_cues_indices=(1, 4),
         patch_cue_idx=0,
-        max_stops_per_patch=8,
+        stop_ranges_per_patch=np.array([
+            [0, 1],
+            [5, 7],
+            [5, 7],
+        ])
     )
 
     curricum = Curriculum(

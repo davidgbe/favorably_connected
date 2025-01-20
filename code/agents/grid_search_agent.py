@@ -1,14 +1,15 @@
 import numpy as np
+from copy import deepcopy as copy
 
 class GridSearchAgent():
 
-    def __init__(self, n_envs, wait_time_for_reward, odor_cues_indices, patch_cue_idx, max_stops_per_patch):
+    def __init__(self, n_envs, wait_time_for_reward, odor_cues_indices, patch_cue_idx, stop_ranges_per_patch):
         self.wait_time_for_reward = wait_time_for_reward
         self.rewards = []
         self.odor_cues_start = odor_cues_indices[0]
         self.odor_cues_end = odor_cues_indices[1]
         self.patch_cue_idx = patch_cue_idx
-        self.max_stops_per_patch = max_stops_per_patch
+        self.stop_ranges_per_patch = stop_ranges_per_patch # (n_patches, 2)
 
         self.last_observations = None
         self.dwell_time = np.zeros((n_envs), dtype=int)
@@ -17,12 +18,13 @@ class GridSearchAgent():
         self.n_envs = n_envs
 
         n_patches = self.odor_cues_end - self.odor_cues_start
-        self.reward_rates_for_policies = np.zeros((n_envs, (max_stops_per_patch + 1) ** n_patches))
-        self.n_stops_for_policies = np.zeros((n_patches, (max_stops_per_patch + 1) ** n_patches), dtype=int)
-        self.n_stops_for_patch = np.zeros((n_patches), dtype=int)
+        self.reward_rates_for_policies = np.zeros((n_envs, (stop_ranges_per_patch.max() + 1) ** n_patches))
+        self.n_stops_for_policies = np.zeros((n_patches, (stop_ranges_per_patch.max() + 1) ** n_patches), dtype=int)
+        self.n_stops_for_patch = copy(stop_ranges_per_patch[:, 0])
         self.optimized_n_stops_for_patch = np.zeros((n_envs, n_patches), dtype=int)
 
         self.search_finished = False
+        self.policy_idx = 0
 
     def sample_action(self, observations):
         if self.last_observations is None:
@@ -74,40 +76,33 @@ class GridSearchAgent():
             rewards = np.array(self.rewards)
             avg_reward_rates = np.mean(self.rewards, axis=0)
 
-            policy_idx = int(np.dot(
-                np.power(
-                    (self.max_stops_per_patch + 1) * np.ones(self.n_stops_for_patch.shape[0]),
-                    np.arange(self.n_stops_for_patch.shape[0])
-                ),
-                self.n_stops_for_patch,
-            ))
-
-            self.n_stops_for_policies[:, policy_idx] = self.n_stops_for_patch.copy()
-            self.reward_rates_for_policies[:, policy_idx] = avg_reward_rates
+            self.n_stops_for_policies[:, self.policy_idx] = self.n_stops_for_patch.copy()
+            self.reward_rates_for_policies[:, self.policy_idx] = avg_reward_rates
 
             print('Policy end:')
-            print('Index', policy_idx)
-            print(self.n_stops_for_policies[:, policy_idx])
-            print('Reward rates', self.reward_rates_for_policies[:, policy_idx])
+            print('Index', self.policy_idx)
+            print(self.n_stops_for_policies[:, self.policy_idx])
+            print('Reward rates', self.reward_rates_for_policies[:, self.policy_idx])
 
             idx = 0
-            if (self.n_stops_for_patch == self.max_stops_per_patch).all():
+            if (self.n_stops_for_patch == self.stop_ranges_per_patch[:, 1]).all():
                 self.search_finished = True
                 for k in range(self.n_envs):
                     print(self.reward_rates_for_policies[k, :])
                     optimal_policy_idx = self.reward_rates_for_policies[k, :].argmax()
                     self.optimized_n_stops_for_patch[k, :] = self.n_stops_for_policies[:, optimal_policy_idx]
+                    print(self.optimized_n_stops_for_patch)
             else:
                 idx = 0
                 while idx < len(self.n_stops_for_patch):
-                    if self.n_stops_for_patch[idx] < self.max_stops_per_patch:
+                    if self.n_stops_for_patch[idx] < self.stop_ranges_per_patch[idx, 1]:
                         self.n_stops_for_patch[idx] += 1
                         break
                     else:
-                        self.n_stops_for_patch[idx] = 0
+                        self.n_stops_for_patch[idx] = self.stop_ranges_per_patch[idx, 0]
                         idx += 1
 
-                # print('Policy:', self.n_stops_for_patch)
+            self.policy_idx += 1
             
 
     def reset_state(self):
