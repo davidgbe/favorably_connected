@@ -44,14 +44,13 @@ DECODING_PERIOD = 200
 BATCH_SIZE = 100
 
 ATTR_POOL_SIZE = 15
-ATTR_POOL_W_EE = 1 / np.sqrt(ATTR_POOL_SIZE)
 
 
 def sample_random_walks(batch_size, t, input_len, p_vec):
     # create (batch_size, t) mat
     trajectories = np.zeros((batch_size, t))
     p = p_vec.reshape(batch_size, 1) * np.ones((batch_size, input_len))
-    trajectories[:, :input_len] = np.where(np.random.rand(batch_size, input_len) < p, 1, 0)
+    trajectories[:, :input_len] = np.where(np.random.rand(batch_size, input_len) < p, 1, -1)
     return torch.from_numpy(trajectories.reshape(batch_size, 1, t)).float()
 
 if __name__ == '__main__':
@@ -69,13 +68,9 @@ if __name__ == '__main__':
         var_noise=VAR_NOISE,
     )
 
-    w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) / np.sqrt(ATTR_POOL_SIZE)
+    w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * (1.5 / np.sqrt(ATTR_POOL_SIZE))
     w_line_attr = np.outer(w_line_attr_pc, w_line_attr_pc)
-
-    # network.rnn.weight_ih.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_SIZE, :] = torch.from_numpy(0.01 * w_line_attr_pc.reshape(ATTR_POOL_SIZE, 1)).float().to(DEVICE)
     network.rnn.weight_hh.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_SIZE, : ATTR_POOL_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
-    # network.output_arm.weight.data = torch.from_numpy(w_line_attr_pc.reshape(1, ATTR_POOL_SIZE)).float().to(DEVICE)
-    # network.output_arm.bias.data = torch.from_numpy(0.5 * np.ones(1)).float().to(DEVICE)
 
     scale = 10
     fig, axs = plt.subplots(1, 3, figsize=(4 * scale, 1 * scale))
@@ -95,7 +90,7 @@ if __name__ == '__main__':
         p_on = np.random.rand((BATCH_SIZE))
     
         inputs = sample_random_walks(BATCH_SIZE, T, T - DECODING_PERIOD, p_on).detach().to(DEVICE)
-        target_outputs = torch.sum(inputs, dim=2) / T
+        target_outputs = torch.sum(inputs, dim=2) / (T - DECODING_PERIOD)
         optimizer.zero_grad()
         outputs, activity = network(inputs, output_steps=DECODING_PERIOD)
         print(outputs)

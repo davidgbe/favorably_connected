@@ -23,6 +23,7 @@ import matplotlib.pyplot as plt
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
 parser.add_argument('--exp_title', metavar='et', type=str)
+parser.add_argument('--mag', metavar='mag', type=float, default=1)
 parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
 args = parser.parse_args()
 
@@ -30,7 +31,7 @@ args = parser.parse_args()
 env_vars = get_env_vars(args.env)
 
 OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'line_attr_supervised')
-OUTPUT_SAVE_RATE = 1
+OUTPUT_SAVE_RATE = 100
 
 HIDDEN_SIZE = 32
 INPUT_SIZE = 1
@@ -44,7 +45,7 @@ DECODING_PERIOD = 200
 BATCH_SIZE = 100
 
 ATTR_POOL_SIZE = 15
-ATTR_POOL_W_EE = 1 / np.sqrt(ATTR_POOL_SIZE)
+ATTR_POOL_W_EE = args.mag / np.sqrt(ATTR_POOL_SIZE)
 
 
 def sample_random_walks(batch_size, t, input_len, p_vec):
@@ -69,7 +70,7 @@ if __name__ == '__main__':
         var_noise=VAR_NOISE,
     )
 
-    w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) / np.sqrt(ATTR_POOL_SIZE)
+    w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * ATTR_POOL_W_EE
     w_line_attr = np.outer(w_line_attr_pc, w_line_attr_pc)
 
     # network.rnn.weight_ih.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_SIZE, :] = torch.from_numpy(0.01 * w_line_attr_pc.reshape(ATTR_POOL_SIZE, 1)).float().to(DEVICE)

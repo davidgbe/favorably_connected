@@ -48,7 +48,7 @@ def sample_random_walks(batch_size, t, input_len, p_vec):
     # create (batch_size, t) mat
     trajectories = np.zeros((batch_size, t))
     p = p_vec.reshape(batch_size, 1) * np.ones((batch_size, input_len))
-    trajectories[:, :input_len] = np.where(np.random.rand(batch_size, input_len) < p, 1, 0)
+    trajectories[:, :input_len] = np.where(np.random.rand(batch_size, input_len) < p, 1, -1)
     return torch.from_numpy(trajectories.reshape(batch_size, 1, t)).float()
 
 if __name__ == '__main__':
@@ -68,7 +68,7 @@ if __name__ == '__main__':
         var_noise=VAR_NOISE,
     )
 
-    load_path = './results/line_attr_supervised/ramping_la_partial_mag_150_2025-01-24_10_33_51_945950_var_noise_5e-05_activity_weight_1e-07/rnn_weights/003999.h5'
+    load_path = './results/line_attr_supervised/ramping_la_plus_min_150_2025-01-24_13_26_24_985440_var_noise_5e-05_activity_weight_1e-07/rnn_weights/003999.h5'
     network.load_state_dict(torch.load(load_path, weights_only=True))
 
     # v = np.real(np.linalg.eig(network.rnn.weight_hh.data[2 * HIDDEN_SIZE:3 *HIDDEN_SIZE, :].cpu().numpy()).eigenvectors[:, 0])
@@ -98,7 +98,7 @@ if __name__ == '__main__':
             p_on = np.random.rand((BATCH_SIZE))
         
             inputs = sample_random_walks(BATCH_SIZE, T, T - DECODING_PERIOD, p_on).detach().to(DEVICE)
-            target_outputs = torch.sum(inputs, dim=2) / (T)
+            target_outputs = torch.sum(inputs, dim=2) / (T - DECODING_PERIOD)
 
             outputs, activity = network(inputs, output_steps=DECODING_PERIOD)
             indices = torch.from_numpy(np.arange(BATCH_SIZE)).to(DEVICE)
