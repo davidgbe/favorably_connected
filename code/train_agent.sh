@@ -9,4 +9,4 @@
 
 python ./scripts/train_treadmill_agent.py \
     --env CODE_OCEAN \
-    --pipe_line 1 \
+    --pipeline 1 \
