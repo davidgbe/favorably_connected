@@ -40,7 +40,8 @@ class Patch:
 
 
     def get_reward(self):
-        r = self.reward_func(self.reward_sum)
+        r = self.reward_func(self.current_reward_site_idx)
+        # r = self.reward_func(self.reward_sum)
         self.reward_sum += r
         return r
 

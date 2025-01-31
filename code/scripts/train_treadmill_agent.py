@@ -13,8 +13,8 @@ from tqdm.auto import trange
 from environments.treadmill_session import TreadmillSession
 from environments.components.patch_type import PatchType
 from environments.curriculum import Curriculum
-from agents.networks.a2c_rnn import A2CRNN
-from agents.a2c_recurrent_agent import A2CRecurrentAgent
+from agents.networks.a2c_rnn_split import A2CRNN
+from agents.a2c_recurrent_agent_split import A2CRecurrentAgent
 from aux_funcs import zero_pad, make_path_if_not_exists, compressed_write, load_first_json
 import optuna
 from datetime import datetime
@@ -33,6 +33,7 @@ parser.add_argument('--noise_var', metavar='nv', type=float, default=0)
 parser.add_argument('--activity_reg', metavar='ar', type=float, default=0)
 parser.add_argument('--curr_style', metavar='cs', type=str, default='MIXED')
 parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
+# parser.add_argument('--agent_type', metavar='at', type=str, default='split')
 parser.add_argument('--pipeline', metavar='p', type=int, default=0)
 args = parser.parse_args()
 

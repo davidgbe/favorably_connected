@@ -34,21 +34,30 @@ class A2CRNN(nn.Module):
             input_size=self.input_size, 
             hidden_size=hidden_size,
         ).to(device)
+        self.critic_rnn = nn.GRUCell(
+            input_size=self.input_size, 
+            hidden_size=hidden_size,
+        ).to(device)
         self.action_arm = nn.Linear(hidden_size, action_size).to(device)
         self.value_arm = nn.Linear(hidden_size, 1).to(device)
         # hidden states of [n_layers, n_envs, hidden_size]
         self.hidden_states = None
+        self.critic_hidden_states = None
         self.var_noise = var_noise
     
     def reset_state(self):
         hidden_states = self.hidden_states.detach().cpu()
+        critic_hidden_states = self.critic_hidden_states.detach().cpu()
         self.hidden_states = None
-        return hidden_states
+        self.critic_hidden_states = None
+        return hidden_states, critic_hidden_states
 
     
-    def set_state(self, hidden_states):
+    def set_state(self, hidden_states, critic_hidden_states):
         self.hidden_states = hidden_states
         self.hidden_states = self.hidden_states.to(self.device)
+        self.critic_hidden_states = critic_hidden_states
+        self.critic_hidden_states = self.critic_hidden_states.to(self.device)
 
 
     def forward(self, inputs):
@@ -63,15 +72,19 @@ class A2CRNN(nn.Module):
         # if self.hidden_states is None, it just defaults to zeros
         if self.hidden_states is None: 
             new_hidden_states = self.rnn(inputs)
+            new_critic_hidden_states = self.critic_rnn(inputs)
         else: 
             # need to add a dimension for num_layers
             new_hidden_states = self.rnn(inputs, self.hidden_states)
+            new_critic_hidden_states = self.critic_rnn(inputs, self.critic_hidden_states)
 
         # print('Hidden states mean', new_hidden_states.norm(1).mean().cpu())
         new_hidden_states += (self.var_noise**0.5) * torch.randn(new_hidden_states.shape).detach().to(self.device) # add gaussian noise to activity
+        new_critic_hidden_states += (self.var_noise**0.5) * torch.randn(new_critic_hidden_states.shape).detach().to(self.device) # add gaussian noise to activity
         self.hidden_states = new_hidden_states
+        self.critic_hidden_states = new_critic_hidden_states
         # need to get rid of layers dimension, which is at dim 0. 
         action_logits = self.action_arm(new_hidden_states)
-        value = self.value_arm(new_hidden_states)
+        value = self.value_arm(new_critic_hidden_states)
         # values have 2nd dimension of 1, get rid of it
         return (action_logits, value.squeeze(1), new_hidden_states.clone())

@@ -212,7 +212,7 @@ class TreadmillSession(gym.Env):
         
         if self.get_reward_site_idx_of_current_pos() != -1:
             if not self.odor_lesioned:
-                observations[1 + self.current_patch.get_odor_num()] = 1
+                observations[1 + self.current_patch.get_odor_num()] = 0.95
             else:
                 observations[1] = 1
         return observations
