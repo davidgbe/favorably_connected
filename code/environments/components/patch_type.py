@@ -17,7 +17,7 @@ class PatchType:
             self.interreward_site_len_mean,
             self.reward_func,
             self.odor_num,
-            self.reward_func_param
+            self.reward_func_param,
         )
 
 

@@ -17,6 +17,7 @@ class Patch:
         self.reward_func = reward_func
         self.odor_num = odor_num
         self.reward_func_param = reward_func_param
+        self.reward_sum = 0
 
         self.current_reward_site_idx = -1
         self.current_reward_site_bounds = None
@@ -39,7 +40,9 @@ class Patch:
 
 
     def get_reward(self):
-        return self.reward_func(self.current_reward_site_idx)
+        r = self.reward_func(self.reward_sum)
+        self.reward_sum += r
+        return r
 
     
     def get_odor_num(self):

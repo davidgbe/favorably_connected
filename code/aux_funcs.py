@@ -7,6 +7,8 @@ from matplotlib.collections import LineCollection
 import warnings
 import pickle
 import blosc
+import os
+import json
 
 
 def zero_pad(s, n):
@@ -153,3 +155,24 @@ def logical_and(*args):
         else:
             v = np.logical_and(v, args[i])
     return v
+
+
+def load_first_json(directory):
+    """Loads the first JSON file found in a directory."""
+    try:
+        # List all files in the directory
+        files = sorted(os.listdir(directory))
+        
+        # Find the first JSON file
+        for file in files:
+            if file.lower().endswith('.json'):
+                json_path = os.path.join(directory, file)
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return data, file
+        
+        print("No JSON files found in the directory.")
+        return None
+    except Exception as e:
+        print(f"Error: {e}")
+        return None

@@ -1,6 +1,7 @@
+import sys
+from pathlib import Path
+
 if __name__ == '__main__':
-    import sys
-    from pathlib import Path
     curr_file_path = Path(__file__)
     sys.path.append(str(curr_file_path.parent.parent))
 
@@ -14,7 +15,7 @@ from environments.components.patch_type import PatchType
 from environments.curriculum import Curriculum
 from agents.networks.a2c_rnn import A2CRNN
 from agents.a2c_recurrent_agent import A2CRecurrentAgent
-from aux_funcs import zero_pad, make_path_if_not_exists, compressed_write
+from aux_funcs import zero_pad, make_path_if_not_exists, compressed_write, load_first_json
 import optuna
 from datetime import datetime
 import argparse
@@ -27,12 +28,22 @@ from load_env import get_env_vars
 
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
-parser.add_argument('--exp_title', metavar='et', type=str)
+parser.add_argument('--exp_title', metavar='et', type=str, default='run')
 parser.add_argument('--noise_var', metavar='nv', type=float, default=0)
 parser.add_argument('--activity_reg', metavar='ar', type=float, default=0)
 parser.add_argument('--curr_style', metavar='cs', type=str, default='MIXED')
 parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
+parser.add_argument('--pipeline', metavar='p', type=int, default=0)
 args = parser.parse_args()
+
+curr_file_path = Path(__file__)
+
+if bool(args.pipeline):
+    data, file_name = load_first_json(os.path.join(curr_file_path.parent.parent.parent, 'data/rl_agent_outputs'))
+    args.noise_var = data['noise_var']
+    args.activity_reg = data['activity_reg']
+    args.curr_style = data['curr_style']
+    args.exp_title = file_name.replace('.json', '')
 
 # GET MACHINE ENV VARS
 env_vars = get_env_vars(args.env)
@@ -240,8 +251,8 @@ def objective(trial, var_noise, activity_weight):
             avg_rewards_per_update[:, update_num] = np.mean(total_rewards, axis=1)
             total_loss, actor_loss, critic_loss, entropy_loss = agent.get_losses()
             agent.update(total_loss)
-            hidden_states = agent.reset_state()
-            agent.set_state(hidden_states)
+            hidden_states, critic_hidden_states = agent.reset_state()
+            agent.set_state(hidden_states, critic_hidden_states)
 
             total_losses[update_num] = total_loss.detach().cpu().numpy()
             actor_losses[update_num] = actor_loss.detach().cpu().numpy()
@@ -267,34 +278,6 @@ def objective(trial, var_noise, activity_weight):
                 pass
         save_num += 1
         agent.reset_state()
-
-        # steps_before_prune = 100
-
-        # if trial is not None and sample_phase > 0:
-        #     if sample_phase > steps_before_prune:
-        #         intermediate_value = avg_rewards_per_update[:, sample_phase - steps_before_prune : sample_phase].mean()
-        #     else:
-        #         intermediate_value = avg_rewards_per_update[:, :sample_phase].mean()
-            
-        #     trial.report(intermediate_value, sample_phase)
-
-        #     if trial.should_prune():
-        #         raise optuna.TrialPruned()
-
-        # snapshot = tracemalloc.take_snapshot()
-        # mem_size, mem_peak = tracemalloc.get_traced_memory()
-        # conv_to_mb = 1024**2
-        # print(f'mem size: {mem_size / conv_to_mb}, mem peak: {mem_peak / conv_to_mb}')
-        # tracemalloc.reset_peak()
-
-        # if last_snapshot is not None:
-        #     top_stats = snapshot.compare_to(last_snapshot, 'lineno')
-
-        #     print("[ Top 10 differences ]")
-        #     for stat in top_stats[:10]:
-        #         print(stat)
-        # last_snapshot = snapshot
-
 
     final_value = avg_rewards_per_update.mean()
     print('final_reward_total', final_value)
