@@ -1,9 +1,0 @@
-{
-	"version": 1,
-	"attached_datasets": [
-		{
-			"id": "bdd1a4b1-bc21-4194-9f5a-3162a64bf3af",
-			"mount": "structural_priors_in_rl_low_noise_02_2024-12-02"
-		}
-	]
-}
