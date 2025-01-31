@@ -23,7 +23,7 @@ if __name__ == '__main__':
         run_dir_path = os.path.join(
             curr_file_path.parent.parent.parent,
             f'results/rl_agent_outputs',
-        ).replace('/', '\\')
+        ).replace('\\', '/')
 
         make_path_if_not_exists(run_dir_path)
 
