@@ -33,14 +33,17 @@ parser.add_argument('--noise_var', metavar='nv', type=float, default=0)
 parser.add_argument('--activity_reg', metavar='ar', type=float, default=0)
 parser.add_argument('--curr_style', metavar='cs', type=str, default='MIXED')
 parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
-# parser.add_argument('--agent_type', metavar='at', type=str, default='split')
+parser.add_argument('--agent_type', metavar='at', type=str, default='split')
 parser.add_argument('--pipeline', metavar='p', type=int, default=0)
 args = parser.parse_args()
 
 curr_file_path = Path(__file__)
 
 if bool(args.pipeline):
-    data, file_name = load_first_json(os.path.join(curr_file_path.parent.parent.parent, 'data/rl_agent_outputs'))
+    if args.env == 'CODE_OCEAN':
+        data, file_name = load_first_json(os.path.join(curr_file_path.parent.parent.parent, 'data'))
+    else:
+        data, file_name = load_first_json(os.path.join(curr_file_path.parent.parent.parent, 'results/rl_agent_outputs'))
     args.noise_var = data['noise_var']
     args.activity_reg = data['activity_reg']
     args.curr_style = data['curr_style']
@@ -78,7 +81,10 @@ N_STEPS_PER_UPDATE = 200
 # OTHER PARMS
 DEVICE = 'cuda'
 OUTPUT_STATE_SAVE_RATE = 50 # save one in 10 sessions
-OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
+if args.env == 'CODE_OCEAN':
+    OUTPUT_BASE_DIR = env_vars['RESULTS_PATH']
+else:
+    OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
 
 
 def make_deterministic_treadmill_environment(env_idx):
