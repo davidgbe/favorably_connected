@@ -2,9 +2,14 @@
 set -ex
 
 # This is the master script for the capsule. When you click "Reproducible Run", the code in this file will execute.
-bash train_agent.sh "$@"
+bash start_train_agent.sh "$@"
 
 # The previous version of this file was commented-out and follows below:
 #
-# bash start_train_agent.sh "$@"
+# bash train_agent.sh "$@"
+# 
+# # The previous version of this file was commented-out and follows below:
+# #
+# # bash start_train_agent.sh "$@"
+# # 
 # 
