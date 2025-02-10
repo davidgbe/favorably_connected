@@ -31,9 +31,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--exp_title', metavar='et', type=str, default='run')
 parser.add_argument('--noise_var', metavar='nv', type=float, default=0)
 parser.add_argument('--activity_reg', metavar='ar', type=float, default=0)
-parser.add_argument('--curr_style', metavar='cs', type=str, default='MIXED')
+parser.add_argument('--curr_style', metavar='cs', type=str, default='FIXED')
 parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
 parser.add_argument('--agent_type', metavar='at', type=str, default='split')
+parser.add_argument('--connectivity', metavar='at', type=str, default='VANILLA')
 parser.add_argument('--pipeline', metavar='p', type=int, default=0)
 args = parser.parse_args()
 
@@ -67,6 +68,7 @@ CURRICULUM_STYLE = args.curr_style
 
 # AGENT PARAMS
 HIDDEN_SIZE = 128
+ATTR_POOL_SIZE = 15
 CRITIC_WEIGHT = 0.07846647668470078
 ENTROPY_WEIGHT = 1.0158892869509133e-06
 GAMMA = 0.9867118269299845
@@ -74,7 +76,7 @@ LEARNING_RATE = 1e-4 #0.0006006712322528219
 
 # TRAINING PARAMS
 NUM_ENVS = 30
-N_SESSIONS = 20 #20000
+N_SESSIONS = 20000
 N_UPDATES_PER_SESSION = 100
 N_STEPS_PER_UPDATE = 200
 
@@ -204,6 +206,11 @@ def objective(trial, var_noise, activity_weight):
         device=DEVICE,
         var_noise=var_noise,
     )
+
+    if args.connectivity == 'LINE':
+        w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * (1.5 / np.sqrt(ATTR_POOL_SIZE))
+        w_line_attr = np.outer(w_line_attr_pc, w_line_attr_pc)
+        network.rnn.weight_hh.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_SIZE, : ATTR_POOL_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
 
     optimizer = torch.optim.RMSprop(network.parameters(), lr=learning_rate)
 

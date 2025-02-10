@@ -202,7 +202,7 @@ class TreadmillSession(gym.Env):
         # observations entirely determined by location
         # there are 2 visual cues plus odor cues equal to the number of patchs
 
-        observations = np.zeros((self.obs_size), dtype=int)
+        observations = np.zeros((self.obs_size), dtype=float)
 
         # [entering_patch_visual_cue, leaving_patch_visual_cue, odor_cue_1, odor_cue_2, ...]
         # if within spatial_buffer_for_visual_cues of start of patch, give `entering_patch_visual_cue`
@@ -212,7 +212,7 @@ class TreadmillSession(gym.Env):
         
         if self.get_reward_site_idx_of_current_pos() != -1:
             if not self.odor_lesioned:
-                observations[1 + self.current_patch.get_odor_num()] = 0.95
+                observations[1 + self.current_patch.get_odor_num()] = 1
             else:
                 observations[1] = 1
         return observations
