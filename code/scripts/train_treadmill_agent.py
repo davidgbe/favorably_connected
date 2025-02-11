@@ -29,8 +29,8 @@ from load_env import get_env_vars
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
 parser.add_argument('--exp_title', metavar='et', type=str, default='run')
-parser.add_argument('--noise_var', metavar='nv', type=float, default=0)
-parser.add_argument('--activity_reg', metavar='ar', type=float, default=0)
+parser.add_argument('--noise_var', metavar='nv', type=float, default=1e-4)
+parser.add_argument('--activity_reg', metavar='ar', type=float, default=1)
 parser.add_argument('--curr_style', metavar='cs', type=str, default='FIXED')
 parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
 parser.add_argument('--agent_type', metavar='at', type=str, default='split')
