@@ -1,8 +1,10 @@
 {
     "LOCAL": {
-        "RESULTS_PATH": "./results"
+        "RESULTS_PATH": "./results",
+        "DATA_PATH": "./results"
     },
     "CODE_OCEAN": {
-        "RESULTS_PATH": "/results"
+        "RESULTS_PATH": "/results",
+        "DATA_PATH": "/data"
     }
 }
