@@ -24,6 +24,7 @@ import pickle
 from copy import deepcopy as copy
 import tracemalloc
 from load_env import get_env_vars
+import matplotlib.pyplot as plt
 
 
 # PARSE ARGUMENTS
@@ -211,6 +212,37 @@ def objective(trial, var_noise, activity_weight):
         w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * (1.5 / np.sqrt(ATTR_POOL_SIZE))
         w_line_attr = np.outer(w_line_attr_pc, w_line_attr_pc)
         network.rnn.weight_hh.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_SIZE, : ATTR_POOL_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
+
+    if args.connectivity == 'LINE_PLUS_INPUT':
+        w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * (1.5 / np.sqrt(ATTR_POOL_SIZE))
+        w_line_attr = np.outer(w_line_attr_pc, w_line_attr_pc)
+        network.rnn.weight_hh.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_SIZE, : ATTR_POOL_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
+
+        i = 2
+        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, :6] = torch.zeros((ATTR_POOL_SIZE, 6)).float().to(DEVICE)
+        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, 6] =  torch.from_numpy(w_line_attr_pc).float().to(DEVICE)
+
+        i = 1
+        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, 1:] = torch.zeros((ATTR_POOL_SIZE, 6)).float().to(DEVICE)
+        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, 0] =  torch.from_numpy(w_line_attr_pc).float().to(DEVICE)
+
+        scale = 10
+        fig, axs = plt.subplots(1, 3, figsize=(4 * scale, 1 * scale))
+
+        weight_hh = network.rnn.weight_hh.data.clone().detach().cpu().numpy()
+        m = np.max(np.abs(weight_hh))
+        for k in range(3):
+            cbar = axs[k].matshow(weight_hh[k * HIDDEN_SIZE:(k+1) * HIDDEN_SIZE, :], vmin=-m, vmax=m, cmap='bwr')
+            plt.colorbar(cbar)
+        fig.savefig(os.path.join(output_dir, f'weights.png'))
+
+        weight_ih = network.rnn.weight_ih.data.clone().detach().cpu().numpy()
+        m = np.max(np.abs(weight_ih))
+        for k in range(3):
+            cbar = axs[k].matshow(weight_ih[k * HIDDEN_SIZE:(k+1) * HIDDEN_SIZE, :], vmin=-m, vmax=m, cmap='bwr')
+            plt.colorbar(cbar)
+        fig.savefig(os.path.join(output_dir, f'input_weights.png'))
+
 
     optimizer = torch.optim.RMSprop(network.parameters(), lr=learning_rate)
 

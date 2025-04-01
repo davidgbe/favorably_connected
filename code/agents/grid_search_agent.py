@@ -3,7 +3,7 @@ from copy import deepcopy as copy
 
 class GridSearchAgent():
 
-    def __init__(self, n_envs, wait_time_for_reward, odor_cues_indices, patch_cue_idx, stop_ranges_per_patch):
+    def __init__(self, n_envs, wait_time_for_reward, odor_cues_indices, patch_cue_idx, stop_ranges_per_patch, strategy='reward_count'):
         self.wait_time_for_reward = wait_time_for_reward
         self.rewards = []
         self.odor_cues_start = odor_cues_indices[0]
@@ -14,6 +14,7 @@ class GridSearchAgent():
         self.last_observations = None
         self.dwell_time = np.zeros((n_envs), dtype=int)
         self.odor_site_idx = np.zeros((n_envs), dtype=int)
+        self.rewards_in_patch = np.zeros((n_envs), dtype=int)
         self.current_patch_type = np.zeros((n_envs), dtype=int)
         self.n_envs = n_envs
 
@@ -40,6 +41,8 @@ class GridSearchAgent():
         odor_cues_comp = odor_cues - last_odor_cues
 
         self.odor_site_idx = np.where(patch_start_cues_comp > 0, 0, self.odor_site_idx)
+        self.rewards_in_patch = np.where(patch_start_cues_comp > 0, 0, self.rewards_in_patch)
+
         self.current_patch_type = np.where(odor_cues.sum(axis=1) > 0, odor_cues.argmax(axis=1), self.current_patch_type)
         current_odor_cue_off = np.array([odor_cues_comp[k, self.current_patch_type[k]] for k in range(self.n_envs)]) < 0
         self.odor_site_idx = np.where(current_odor_cue_off, self.odor_site_idx + 1, self.odor_site_idx)
@@ -53,7 +56,10 @@ class GridSearchAgent():
 
         odor_site_entered = np.array([odor_cues_comp[k, self.current_patch_type[k]] for k in range(self.n_envs)]) > 0
 
-        should_stop = np.logical_and(self.odor_site_idx < stops_for_patch, odor_site_entered)
+        if self.strategy == 'site_count':
+            should_stop = np.logical_and(self.odor_site_idx < stops_for_patch, odor_site_entered)
+        elif self.strategy == 'reward_count':
+            should_stop = np.logical_and(self.rewards_in_patch < stops_for_patch, odor_site_entered)
         self.dwell_time = np.where(should_stop, self.wait_time_for_reward, self.dwell_time)
 
         action = np.where(self.dwell_time > 0, 0, 1)
@@ -69,6 +75,7 @@ class GridSearchAgent():
 
     def append_reward(self, reward):
         self.rewards.append(reward)
+        self.rewards_in_patch += reward
 
     
     def cue_session_end(self):

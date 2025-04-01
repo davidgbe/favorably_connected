@@ -188,17 +188,22 @@ class A2CRecurrentAgent:
         """
         hidden_states = None
         if reset_hidden:
-            hidden_states, critic_hidden_states = self.net.reset_state()
+            hidden_states, critic_hidden_states, subnetwork_hidden_states = self.net.reset_state()
         self.log_probs = []
         self.rewards = []
         self.values = []
         self.entropies = []
         self.activities = []
-        return hidden_states, critic_hidden_states
+        return hidden_states, critic_hidden_states, subnetwork_hidden_states
 
 
-    def set_state(self, hidden_states, critic_hidden_states):
-        self.net.set_state(hidden_states, critic_hidden_states)
+    def get_state(self):
+        hidden_states, critic_hidden_states, subnetwork_hidden_states = self.net.reset_state()
+        return hidden_states, critic_hidden_states, subnetwork_hidden_states
+
+
+    def set_state(self, hidden_states, critic_hidden_states, subnetwork_hidden_states):
+        self.net.set_state(hidden_states, critic_hidden_states, subnetwork_hidden_states)
 
 
     def get_hidden_state_activities(self):
