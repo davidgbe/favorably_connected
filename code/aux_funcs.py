@@ -176,3 +176,103 @@ def load_first_json(directory):
     except Exception as e:
         print(f"Error: {e}")
         return None
+
+
+def format_plot(
+    axs,
+    linewidth=1,
+    ticklength=8,
+    ticklabelsize=12,
+    axislabelsize=13,
+    tickwidth=1,
+    rightspine=False,
+    leftspine=True,
+    topspine=False,
+    bottomspine=True,
+    ):
+    print(axs)
+    if type(axs) is not list and type(axs) is not np.array and type(axs) is not np.ndarray:
+        axs = [axs]
+
+    if type(axs) is np.ndarray:
+        axs = axs.flatten()
+
+    for ax in axs:
+        ax.spines['top'].set_visible(topspine)
+        ax.spines['right'].set_visible(rightspine)
+        ax.spines['bottom'].set_visible(bottomspine)
+        ax.spines['left'].set_visible(leftspine)
+
+        ax.spines['bottom'].set_linewidth(linewidth)
+        ax.spines['left'].set_linewidth(linewidth)
+
+        ax.tick_params(axis='both', length=ticklength, labelsize=ticklabelsize, width=tickwidth)
+
+        ax.xaxis.label.set_size(axislabelsize)
+        ax.yaxis.label.set_size(axislabelsize)
+
+
+def add_pc_axes(axs):
+    if type(axs) is not list and type(axs) is not np.array and type(axs) is not np.ndarray:
+        axs = [axs]
+
+    if type(axs) is np.ndarray:
+        axs = axs.flatten()
+
+    return [add_inset_axes(ax, xlabel=f'PC {2 * i+1}', ylabel=f'PC {2 * i+2}') for i, ax in enumerate(axs)]
+
+def add_inset_axes(ax, scale=0.3, label_size=8, xlabel="x", ylabel="y"):
+    """
+    Adds a small inset axes to the lower left corner of the given axis.
+
+    Parameters:
+        ax (matplotlib.axes.Axes): The main axis to attach the inset to.
+        scale (float): Fractional size of the inset relative to the main axis (e.g., 0.3 = 30% of size).
+        label_size (int): Font size for the axis labels in the inset.
+        xlabel (str): Label for the x-axis.
+        ylabel (str): Label for the y-axis.
+
+    Returns:
+        inset_ax (matplotlib.axes.Axes): The newly created inset axes.
+    """
+    # Get the position of the main axis
+    bbox = ax.get_position()
+    fig = ax.figure
+
+    # Compute inset size and position
+    width = bbox.width * scale
+    height = bbox.height * scale
+    inset_left = bbox.x0
+    inset_bottom = bbox.y0
+
+    # Create inset axes
+    inset_ax = fig.add_axes([inset_left, inset_bottom, width, height])
+
+    # Remove ticks
+    inset_ax.set_xticks([])
+    inset_ax.set_yticks([])
+
+    # Add axis labels
+    inset_ax.set_xlabel(xlabel, fontsize=label_size)
+    inset_ax.set_ylabel(ylabel, fontsize=label_size)
+
+    inset_ax.patch.set_alpha(0)
+
+    return inset_ax
+
+
+def format_pc_plot(axs):
+    if type(axs) is not list and type(axs) is not np.array and type(axs) is not np.ndarray:
+        axs = [axs]
+
+    if type(axs) is np.ndarray:
+        axs = axs.flatten()
+
+    for ax in axs:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+    pc_axes = add_pc_axes(axs)
+    format_plot(axs, leftspine=False, bottomspine=False, ticklabelsize=16)
+    format_plot(pc_axes)

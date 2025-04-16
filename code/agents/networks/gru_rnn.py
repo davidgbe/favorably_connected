@@ -39,7 +39,7 @@ class GRU_RNN(nn.Module):
         self.hidden_states = self.hidden_states.to(self.device)
 
 
-    def forward(self, inputs, output_steps=None):
+    def forward(self, inputs, output_steps=None, stateful=True):
         if output_steps is None:
             output_steps = inputs.shape[2]
 
@@ -55,7 +55,8 @@ class GRU_RNN(nn.Module):
 
             # print('Hidden states mean', new_hidden_states.norm(1).mean().cpu())
             new_hidden_states += (self.var_noise**0.5) * torch.randn(new_hidden_states.shape).detach().to(self.device) # add gaussian noise to activity
-            self.hidden_states = new_hidden_states
+            if stateful:
+                self.hidden_states = new_hidden_states
             all_hidden[..., k] = new_hidden_states
 
             if k >= inputs.shape[2] - output_steps:
