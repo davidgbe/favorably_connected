@@ -12,6 +12,7 @@ class TreadmillSession(gym.Env):
         interpatch_len,
         dwell_time_for_reward,
         obs_size,
+        obs_noise_std=0,
         verbosity=True,
         first_patch_start=None,
         odor_lesioned=False,
@@ -32,7 +33,8 @@ class TreadmillSession(gym.Env):
         if obs_size < len(patch_types):
             raise ValueError("'obs_size' must be at least equal to the number of patch types")
         self.obs_size = obs_size
-        self.observation_space = spaces.MultiDiscrete(np.ones(obs_size, dtype=int))
+        self.obs_noise_std = obs_noise_std
+        self.observation_space = spaces.Box(low=-10, high=10, shape=(obs_size,), dtype=np.float32)
         self.action_space = spaces.Discrete(len(self.step_vals))
 
 
@@ -149,7 +151,7 @@ class TreadmillSession(gym.Env):
                     self.wprint(f'[{rwsb[0]}, {rwsb[1]}]')
                 else:
                     # patch is quit!
-                    new_patch_start = self.current_patch.current_reward_site_bounds[-1][1] + self.interpatch_len
+                    new_patch_start = self.current_patch.current_reward_site_bounds[-1][1] + 1 + np.random.poisson(lam=self.interpatch_len - 1)
                     patch_id = self.generate_next_patch()
                     self.wprint(f'Generate patch of type {patch_id}')
                     self.set_current_patch(patch_id, patch_start=new_patch_start)
@@ -202,19 +204,20 @@ class TreadmillSession(gym.Env):
         # observations entirely determined by location
         # there are 2 visual cues plus odor cues equal to the number of patchs
 
-        observations = np.zeros((self.obs_size), dtype=float)
+        # begin with a noisy vector around all zeros is there is noise in observations
+        observations = np.random.normal(loc=0, size=self.obs_size, scale=self.obs_noise_std)
 
         # [entering_patch_visual_cue, leaving_patch_visual_cue, odor_cue_1, odor_cue_2, ...]
         # if within spatial_buffer_for_visual_cues of start of patch, give `entering_patch_visual_cue`
 
         if self.is_agent_in_current_patch():
-            observations[0] = 1
+            observations[0] += 1
         
         if self.get_reward_site_idx_of_current_pos() != -1:
             if not self.odor_lesioned:
-                observations[1 + self.current_patch.get_odor_num()] = 1
+                observations[1 + self.current_patch.get_odor_num()] += 1
             else:
-                observations[1] = 1
+                observations[1] += 1
         return observations
 
 

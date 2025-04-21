@@ -10,7 +10,8 @@ class A2CRecurrentAgent:
     Implementation adapted from: https://gymnasium.farama.org/tutorials/gymnasium_basics/vector_envs_tutorial/
     """
     def __init__(self, network, action_space_dims, n_envs, device="cpu", activity_weight=0,
-                 critic_weight=0.05, entropy_weight=0.05, learning_rate=7e-4, gamma=0.9, optimizer=None):
+                 critic_weight=0.05, entropy_weight=0.05, learning_rate=7e-4, gamma=0.9, optimizer=None,
+                 input_noise_std=0):
         """
         Initializes recurrent agent: 
         Default values from Wang et al 2018
@@ -33,6 +34,7 @@ class A2CRecurrentAgent:
         self.action_space_dims = action_space_dims
         self.n_envs = n_envs
         self.device = device
+        self.input_noise_std = input_noise_std
         self.log_probs = []  # Stores probability values of the sampled action
         self.rewards = []  # Stores the corresponding rewards
         self.values = [] 
@@ -67,7 +69,9 @@ class A2CRecurrentAgent:
         # the 2 is for reward and time
         inputs = torch.cat((
             obs, past_action_one_hot, past_reward.unsqueeze(dim=1)
-        ), dim=1).to(self.device)
+        ), dim=1)
+        inputs += torch.normal(mean=torch.zeros_like(inputs), std=self.input_noise_std * torch.ones_like(inputs))
+        inputs = inputs.to(self.device)
 
         # run through the network
         action_logits, value, hidden_unit_activity = self.net(inputs)
@@ -188,22 +192,22 @@ class A2CRecurrentAgent:
         """
         hidden_states = None
         if reset_hidden:
-            hidden_states, critic_hidden_states, subnetwork_hidden_states = self.net.reset_state()
+            states = self.net.reset_state()
         self.log_probs = []
         self.rewards = []
         self.values = []
         self.entropies = []
         self.activities = []
-        return hidden_states, critic_hidden_states, subnetwork_hidden_states
+        return states
 
 
     def get_state(self):
-        hidden_states, critic_hidden_states, subnetwork_hidden_states = self.net.reset_state()
-        return hidden_states, critic_hidden_states, subnetwork_hidden_states
+        states = self.net.reset_state()
+        return states
 
 
-    def set_state(self, hidden_states, critic_hidden_states, subnetwork_hidden_states):
-        self.net.set_state(hidden_states, critic_hidden_states, subnetwork_hidden_states)
+    def set_state(self, *states):
+        self.net.set_state(*states)
 
 
     def get_hidden_state_activities(self):

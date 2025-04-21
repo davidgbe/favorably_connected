@@ -66,6 +66,7 @@ REWARD_DECAY_CONSTS = [0, 10, 30]
 REWARD_PROB_PREFACTOR = 0.8
 INTERPATCH_LEN = 6
 CURRICULUM_STYLE = args.curr_style
+INPUT_NOISE_STD = 0.1
 
 # AGENT PARAMS
 HIDDEN_SIZE = 128
@@ -271,6 +272,7 @@ def objective(trial, var_noise, activity_weight):
             learning_rate=learning_rate, # changed for Optuna
             activity_weight=activity_weight,
             optimizer=optimizer,
+            input_noise_std=INPUT_NOISE_STD,
         )
 
         total_losses = np.empty((N_UPDATES_PER_SESSION))
