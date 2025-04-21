@@ -243,6 +243,11 @@ def objective(trial, var_noise, activity_weight):
     with torch.no_grad():
         for session_num in trange(N_SESSIONS, desc='Sessions'):
 
+            if args.ortho:
+                v = np.stack([random_orthogonal_vector(acc_reward_vec) for k in range(NUM_ENVS)])
+            else:
+                v = np.stack([acc_reward_vec for k in range(NUM_ENVS)])
+
             agent = A2CRecurrentAgent(
                 network,
                 action_space_dims=ACTION_SIZE,
@@ -275,13 +280,8 @@ def objective(trial, var_noise, activity_weight):
                     reward_site_idx = info['reward_site_idx']
                     intervention_mask = np.logical_and(reward_site_idx == 2, reward_site_idx != last_reward_site_idx)
                     hidden = agent.net.hidden_states.cpu()
-
-                    if args.ortho:
-                        v = random_orthogonal_vector(acc_reward_vec)
-                    else:
-                        v = acc_reward_vec
                     
-                    hidden[intervention_mask, :] += (args.scale_factor * v).astype(np.uint8)
+                    hidden[intervention_mask, :] += (args.scale_factor * v[intervention_mask, :]).astype(np.uint8)
                     agent.net.hidden_states = hidden.to(DEVICE)
                     last_reward_site_idx = reward_site_idx
 
@@ -296,7 +296,7 @@ def objective(trial, var_noise, activity_weight):
             padded_save_num = zero_pad(str(save_num), 5)
             np.save(os.path.join(reward_rates_output_dir, f'{padded_save_num}.npy'), avg_rewards_per_update)
             print('Avg reward for session:', np.mean(avg_rewards_per_update))
-            if session_num % OUTPUT_STATE_SAVE_RATE == 0 and session_num > 0:
+            if session_num % OUTPUT_STATE_SAVE_RATE == 0:
                 try:
                     compressed_write(all_info, os.path.join(info_output_dir, f'{padded_save_num}.pkl'))
                     np.save(os.path.join(hidden_state_output_dir, f'{padded_save_num}.npy'), hidden_states_for_session)
