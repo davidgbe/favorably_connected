@@ -185,7 +185,7 @@ class A2CRecurrentAgent:
         total_loss.backward(retain_graph=retain_graph)
         self.optimizer.step()
         
-
+        
     def reset_state(self, reset_hidden=True):
         """
         Resets the network, as well as the agent's states. 

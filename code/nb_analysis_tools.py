@@ -140,6 +140,25 @@ def parse_all_sessions(data_path, num_envs):
     return all_time_series_dicts
 
 
+# Load hidden states and behavior of network from `load path`
+def load_hidden_and_behavior(load_path):
+    data = load_numpy(os.path.join(load_path, 'hidden_state/*.npy').replace('\\','/'))
+    data = np.transpose(data, [2, 1, 0])
+    
+    flattened_data = data.reshape(data.shape[0], data.shape[1] * data.shape[2], order='C')
+    
+    pca = PCA()
+    pc_activities = pca.fit_transform(flattened_data.T)
+    pc_activities = pc_activities.T.reshape(data.shape, order='C')
+    
+    all_session_data = parse_all_sessions(
+        os.path.join(load_path, 'state'),
+        30,
+    )
+
+    return data, pc_activities, all_session_data, flattened_data, pca
+
+
 def gen_alignment_chart(w, vs, vlim=None, title='', bias=None, ylabel='PC', scale=0.6):
     if bias is None:
         bias = np.zeros_like(w)

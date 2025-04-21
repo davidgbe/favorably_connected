@@ -276,3 +276,26 @@ def format_pc_plot(axs):
     pc_axes = add_pc_axes(axs)
     format_plot(axs, leftspine=False, bottomspine=False, ticklabelsize=16)
     format_plot(pc_axes)
+
+
+def random_orthogonal_vector(v):
+    v = np.array(v)
+    if np.allclose(v, 0):
+        raise ValueError("Zero vector has no orthogonal vectors of the same length.")
+
+    # Create a random vector
+    rand_vec = np.random.randn(*v.shape)
+
+    # Project rand_vec onto v
+    projection = np.dot(rand_vec, v) / np.dot(v, v) * v
+
+    # Subtract the projection to get the orthogonal component
+    orthogonal = rand_vec - projection
+
+    # Normalize and scale to the same length as v
+    orthogonal_norm = np.linalg.norm(orthogonal)
+    if np.isclose(orthogonal_norm, 0):
+        raise ValueError("Failed to generate a non-parallel vector. Try again.")
+    
+    result = orthogonal / orthogonal_norm * np.linalg.norm(v)
+    return result
