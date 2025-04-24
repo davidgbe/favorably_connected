@@ -9,6 +9,7 @@ import pickle
 import blosc
 import os
 import json
+from numpy.linalg import norm
 
 
 def zero_pad(s, n):
@@ -299,3 +300,47 @@ def random_orthogonal_vector(v):
     
     result = orthogonal / orthogonal_norm * np.linalg.norm(v)
     return result
+
+
+def cum_sum(a, axis=None):
+    if type(a) is list:
+        a_ = np.array(a)
+    else:
+        a_ = a
+    if axis is None:
+        cs = np.zeros_like(a_)
+        for i in range(a_.shape[0]):
+            if i > 0:
+                cs[i] += cs[i-1]
+            cs[i] += a_[i]
+    else:
+        shape = np.arange(len(a_.shape))
+        shape = np.concatenate([shape[:axis], shape[axis+1:], [axis]])
+        a_ = a_.transpose(shape)
+        cs = np.zeros_like(a_)
+
+        for i in range(a_.shape[-1]):
+            if i > 0:
+                cs[..., i] += cs[..., i-1]
+            cs[..., i] += a_[..., i]
+        cs = cs.transpose(shape)
+    return cs
+
+
+def cosine(u, v):
+    return np.dot(u, v) / (norm(u)*norm(v))
+
+
+def compute_cosine_sims(u, v, axis=1):
+    if axis == 0:
+        u_ = u.T
+        v_ = v.T
+    else:
+        u_ = u
+        v_ = v
+    
+    cos_sims = []
+    for i in range(u_.shape[1]):
+        for j in range(v_.shape[1]):
+            cos_sims.append(cosine(u_[:, i], v_[:, j]))
+    return np.array(cos_sims)

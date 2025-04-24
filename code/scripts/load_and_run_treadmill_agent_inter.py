@@ -68,6 +68,7 @@ REWARD_DECAY_CONSTS = [0, 10, 30]
 REWARD_PROB_PREFACTOR = 0.8
 INTERPATCH_LEN = 6
 CURRICULUM_STYLE = args.curr_style
+INPUT_NOISE_STD = 0.1
 
 # AGENT PARAMS
 HIDDEN_SIZE = 128
@@ -233,7 +234,7 @@ def objective(trial, var_noise, activity_weight):
         ],
     )
 
-    acc_reward_vec_path = os.path.join(Path(model_path).parents[1], 'stored_pcs_and_weights/rewards_seen_in_patch_130k.pkl')
+    acc_reward_vec_path = os.path.join(Path(model_path).parents[1], 'stored_pcs_and_weights/rewards_seen_in_patch.pkl')
     acc_reward_vec = compressed_read(acc_reward_vec_path)
 
     env_seeds = np.arange(NUM_ENVS)
@@ -247,6 +248,7 @@ def objective(trial, var_noise, activity_weight):
                 v = np.stack([random_orthogonal_vector(acc_reward_vec) for k in range(NUM_ENVS)])
             else:
                 v = np.stack([acc_reward_vec for k in range(NUM_ENVS)])
+                print(v)
 
             agent = A2CRecurrentAgent(
                 network,
@@ -259,6 +261,7 @@ def objective(trial, var_noise, activity_weight):
                 learning_rate=learning_rate, # changed for Optuna
                 activity_weight=activity_weight,
                 optimizer=optimizer,
+                input_noise_std=INPUT_NOISE_STD,
             )
 
             last_reward_site_idx = -1
@@ -281,7 +284,7 @@ def objective(trial, var_noise, activity_weight):
                     intervention_mask = np.logical_and(reward_site_idx == 2, reward_site_idx != last_reward_site_idx)
                     hidden = agent.net.hidden_states.cpu()
                     
-                    hidden[intervention_mask, :] += (args.scale_factor * v[intervention_mask, :]).astype(np.uint8)
+                    hidden[intervention_mask, :] += (args.scale_factor * v[intervention_mask, :])
                     agent.net.hidden_states = hidden.to(DEVICE)
                     last_reward_site_idx = reward_site_idx
 

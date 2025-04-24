@@ -65,6 +65,7 @@ REWARD_DECAY_CONSTS = [0, 10, 30]
 REWARD_PROB_PREFACTOR = 0.8
 INTERPATCH_LEN = 6
 CURRICULUM_STYLE = args.curr_style
+INPUT_NOISE_STD = 0
 
 # AGENT PARAMS
 HIDDEN_SIZE = 128
@@ -73,11 +74,6 @@ CRITIC_WEIGHT = 0.07846647668470078
 ENTROPY_WEIGHT = 1.0158892869509133e-06
 GAMMA = 0.9867118269299845
 LEARNING_RATE = 1e-4 #0.0006006712322528219
-
-# SUBNETWORK PARAMS
-SUB_HIDDEN_SIZE = 32
-SUB_INPUT_SIZE = 2
-SUB_OUTPUT_SIZE = 1
 
 # TRAINING PARAMS
 NUM_ENVS = 30
@@ -247,6 +243,7 @@ def objective(trial, var_noise, activity_weight):
                 learning_rate=learning_rate, # changed for Optuna
                 activity_weight=activity_weight,
                 optimizer=optimizer,
+                input_noise_std=INPUT_NOISE_STD,
             )
 
             avg_rewards_per_update = np.empty((NUM_ENVS, N_UPDATES_PER_SESSION))

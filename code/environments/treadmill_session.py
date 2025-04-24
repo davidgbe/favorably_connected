@@ -149,12 +149,6 @@ class TreadmillSession(gym.Env):
                     self.wprint('New reward site generated')
                     rwsb = self.current_patch.current_reward_site_bounds
                     self.wprint(f'[{rwsb[0]}, {rwsb[1]}]')
-                else:
-                    # patch is quit!
-                    new_patch_start = self.current_patch.current_reward_site_bounds[-1][1] + 1 + np.random.poisson(lam=self.interpatch_len - 1)
-                    patch_id = self.generate_next_patch()
-                    self.wprint(f'Generate patch of type {patch_id}')
-                    self.set_current_patch(patch_id, patch_start=new_patch_start)
                 self.reward_site_dwell_time = 0
                 self.current_reward_site_attempted = False
 
@@ -163,7 +157,8 @@ class TreadmillSession(gym.Env):
             self.current_reward_site_attempted = False
             patch_id = self.generate_next_patch()
             self.wprint(f'Generate patch of type {patch_id}')
-            self.set_current_patch(patch_id, patch_start=self.current_patch.current_reward_site_bounds[1] + self.interpatch_len)
+            new_patch_start = self.current_patch.current_reward_site_bounds[1] + self.interpatch_len
+            self.set_current_patch(patch_id, patch_start=new_patch_start)
 
         self.wprint(f'Total reward is {self.total_reward}')
 
