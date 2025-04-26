@@ -10,6 +10,7 @@ import blosc
 import os
 import json
 from numpy.linalg import norm
+import scipy
 
 
 def zero_pad(s, n):
@@ -344,3 +345,8 @@ def compute_cosine_sims(u, v, axis=1):
         for j in range(v_.shape[1]):
             cos_sims.append(cosine(u_[:, i], v_[:, j]))
     return np.array(cos_sims)
+
+
+def sample_truncated_exp(size, bounds, decay_rate):
+    rv = scipy.stats.truncexpon(b=(bounds[1] - bounds[0]) * decay_rate, scale=1/decay_rate)
+    return rv.rvs(size=size) + bounds[0]

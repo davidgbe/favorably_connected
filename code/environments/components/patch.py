@@ -6,14 +6,14 @@ class Patch:
             self,
             patch_start,
             reward_site_len,
-            interreward_site_len_mean,
+            interreward_site_len_func,
             reward_func,
             odor_num,
             reward_func_param=None
         ):
         self.patch_start = patch_start
         self.reward_site_len = reward_site_len
-        self.interreward_site_len_mean = interreward_site_len_mean
+        self.interreward_site_len_func = interreward_site_len_func
         self.reward_func = reward_func
         self.odor_num = odor_num
         self.reward_func_param = reward_func_param
@@ -25,7 +25,7 @@ class Patch:
 
 
     def generate_reward_site(self):
-        interreward_site_len = 1 + np.random.poisson(lam=self.interreward_site_len_mean - 1)
+        interreward_site_len = self.interreward_site_len_func()
         self.current_reward_site_idx += 1
         if self.current_reward_site_idx == 0:
             rws_start = self.patch_start + interreward_site_len

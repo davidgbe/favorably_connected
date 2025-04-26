@@ -9,7 +9,7 @@ class TreadmillSession(gym.Env):
         self,
         patch_types,
         transition_mat,
-        interpatch_len,
+        interpatch_len_func,
         dwell_time_for_reward,
         obs_size,
         obs_noise_std=0,
@@ -22,7 +22,7 @@ class TreadmillSession(gym.Env):
         self.current_patch_type = None
         self.current_patch_num = None
         self.transition_mat = transition_mat
-        self.interpatch_len = interpatch_len
+        self.interpatch_len_func = interpatch_len_func
         self.dwell_time_for_reward = dwell_time_for_reward
         self.set_verbosity(verbosity)
         self.step_vals = np.array([0, 1])
@@ -157,7 +157,7 @@ class TreadmillSession(gym.Env):
             self.current_reward_site_attempted = False
             patch_id = self.generate_next_patch()
             self.wprint(f'Generate patch of type {patch_id}')
-            new_patch_start = self.current_patch.current_reward_site_bounds[1] + self.interpatch_len
+            new_patch_start = self.current_patch.current_reward_site_bounds[1] + self.interpatch_len_func()
             self.set_current_patch(patch_id, patch_start=new_patch_start)
 
         self.wprint(f'Total reward is {self.total_reward}')
