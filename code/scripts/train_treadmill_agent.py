@@ -15,7 +15,7 @@ from environments.components.patch_type import PatchType
 from environments.curriculum import Curriculum
 from agents.networks.a2c_rnn_split import A2CRNN
 from agents.a2c_recurrent_agent_split import A2CRecurrentAgent
-from aux_funcs import zero_pad, make_path_if_not_exists, compressed_write, load_first_json
+from aux_funcs import zero_pad, make_path_if_not_exists, compressed_write, load_first_json, sample_truncated_exp
 import optuna
 from datetime import datetime
 import argparse
@@ -59,12 +59,15 @@ PATCH_TYPES_PER_ENV = 3
 OBS_SIZE = PATCH_TYPES_PER_ENV + 1
 ACTION_SIZE = 2
 DWELL_TIME_FOR_REWARD = 6
-MAX_REWARD_SITE_LEN = 2
-MIN_REWARD_SITE_LEN = 2
-INTERREWARD_SITE_LEN_MEAN = 2
+# for actual task, reward sites are 50 cm long and interreward sites are between 20 and 100, decay rate 0.05 (truncated exp.)
+REWARD_SITE_LEN = 3
+INTERREWARD_SITE_LEN_BOUNDS = [1, 6]
+INTEREWARD_SITE_LEN_DECAY_RATE = 0.8
 REWARD_DECAY_CONSTS = [0, 10, 30]
 REWARD_PROB_PREFACTOR = 0.8
-INTERPATCH_LEN = 6
+# for actual task, interpatch lengths are 200 to 600 cm, decay rate 0.01 
+INTERPATCH_LEN_BOUNDS = [1, 12]
+INTERPATCH_LEN_DECAY_RATE = 0.1
 CURRICULUM_STYLE = args.curr_style
 INPUT_NOISE_STD = 0.1
 
@@ -84,19 +87,33 @@ N_STEPS_PER_UPDATE = 200
 
 # OTHER PARMS
 DEVICE = 'cuda'
-OUTPUT_STATE_SAVE_RATE = 50 # save one in 10 sessions
+OUTPUT_STATE_SAVE_RATE = 1 # save one in 10 sessions
 if args.env == 'CODE_OCEAN':
     OUTPUT_BASE_DIR = env_vars['RESULTS_PATH']
 else:
     OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
 
 
+def interreward_site_transition():
+    return int(sample_truncated_exp(
+        size=1,
+        bounds=INTERREWARD_SITE_LEN_BOUNDS,
+        decay_rate=INTEREWARD_SITE_LEN_DECAY_RATE,
+    )[0])
+
+
+def interpatch_transition():
+    return int(sample_truncated_exp(
+        size=1,
+        bounds=INTERPATCH_LEN_BOUNDS,
+        decay_rate=INTERPATCH_LEN_DECAY_RATE,
+    )[0])
+
+
 def make_deterministic_treadmill_environment(env_idx):
 
     def make_env():
         np.random.seed(env_idx)
-        
-        reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
 
         print('Begin det. treadmill')
 
@@ -106,10 +123,10 @@ def make_deterministic_treadmill_environment(env_idx):
                 return 1
             patch_types.append(
                 PatchType(
-                    reward_site_len_for_patches[i],
-                    INTERREWARD_SITE_LEN_MEAN,
-                    reward_func,
-                    i,
+                    reward_site_len=REWARD_SITE_LEN,
+                    interreward_site_len_func=interreward_site_transition,
+                    reward_func=reward_func,
+                    odor_num=i,
                     reward_func_param=0.0,
                 )
             )
@@ -117,13 +134,14 @@ def make_deterministic_treadmill_environment(env_idx):
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
         sesh = TreadmillSession(
-            patch_types,
-            transition_mat,
-            INTERPATCH_LEN,
-            DWELL_TIME_FOR_REWARD,
+            patch_types=patch_types,
+            transition_mat=transition_mat,
+            interpatch_len_func=interpatch_transition,
+            dwell_time_for_reward=DWELL_TIME_FOR_REWARD,
             obs_size=PATCH_TYPES_PER_ENV + 1,
             verbosity=False,
         )
+
 
         return sesh
 
@@ -135,7 +153,6 @@ def make_stochastic_treadmill_environment(env_idx):
     def make_env():
         np.random.seed(env_idx + NUM_ENVS)
         
-        reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
         decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
         if CURRICULUM_STYLE == 'MIXED':
             np.random.shuffle(decay_consts_for_reward_funcs)
@@ -155,10 +172,10 @@ def make_stochastic_treadmill_environment(env_idx):
                     return 0
             patch_types.append(
                 PatchType(
-                    reward_site_len_for_patches[i],
-                    INTERREWARD_SITE_LEN_MEAN,
-                    reward_func,
-                    i,
+                    reward_site_len=REWARD_SITE_LEN,
+                    interreward_site_len_func=interreward_site_transition,
+                    reward_func=reward_func,
+                    odor_num=i,
                     reward_func_param=(decay_consts_for_reward_funcs[i] if active else 0.0),
                 )
             )
@@ -166,10 +183,10 @@ def make_stochastic_treadmill_environment(env_idx):
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
         sesh = TreadmillSession(
-            patch_types,
-            transition_mat,
-            INTERPATCH_LEN,
-            DWELL_TIME_FOR_REWARD,
+            patch_types=patch_types,
+            transition_mat=transition_mat,
+            interpatch_len_func=interpatch_transition,
+            dwell_time_for_reward=DWELL_TIME_FOR_REWARD,
             obs_size=PATCH_TYPES_PER_ENV + 1,
             verbosity=False,
         )
