@@ -61,13 +61,11 @@ ACTION_SIZE = 2
 DWELL_TIME_FOR_REWARD = 6
 # for actual task, reward sites are 50 cm long and interreward sites are between 20 and 100, decay rate 0.05 (truncated exp.)
 REWARD_SITE_LEN = 3
-INTERREWARD_SITE_LEN_BOUNDS = [1, 6]
-INTEREWARD_SITE_LEN_DECAY_RATE = 0.8
+INTERREWARD_SITE_LEN_MEAN = 2
 REWARD_DECAY_CONSTS = [0, 10, 30]
 REWARD_PROB_PREFACTOR = 0.8
 # for actual task, interpatch lengths are 200 to 600 cm, decay rate 0.01 
-INTERPATCH_LEN_BOUNDS = [1, 12]
-INTERPATCH_LEN_DECAY_RATE = 0.1
+INTERPATCH_LEN = 6
 CURRICULUM_STYLE = args.curr_style
 INPUT_NOISE_STD = 0.1
 
@@ -95,19 +93,11 @@ else:
 
 
 def interreward_site_transition():
-    return int(sample_truncated_exp(
-        size=1,
-        bounds=INTERREWARD_SITE_LEN_BOUNDS,
-        decay_rate=INTEREWARD_SITE_LEN_DECAY_RATE,
-    )[0])
+    return 1 + np.random.poisson(lam=INTERREWARD_SITE_LEN_MEAN - 1)
 
 
 def interpatch_transition():
-    return int(sample_truncated_exp(
-        size=1,
-        bounds=INTERPATCH_LEN_BOUNDS,
-        decay_rate=INTERPATCH_LEN_DECAY_RATE,
-    )[0])
+    return INTERPATCH_LEN
 
 
 def make_deterministic_treadmill_environment(env_idx):

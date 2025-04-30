@@ -1,0 +1,265 @@
+import sys
+from pathlib import Path
+
+if __name__ == '__main__':
+    curr_file_path = Path(__file__)
+    sys.path.append(str(curr_file_path.parent.parent))
+
+import torch
+import numpy as np
+import os
+import gymnasium as gym
+from tqdm.auto import trange
+from environments.treadmill_session import TreadmillSession
+from environments.components.patch_type import PatchType
+from environments.curriculum import Curriculum
+from agents.grid_search_agent import GridSearchAgent
+from aux_funcs import zero_pad, make_path_if_not_exists, compressed_write, load_first_json, sample_truncated_exp
+import optuna
+from datetime import datetime
+import argparse
+import multiprocessing as mp
+import pickle
+from copy import deepcopy as copy
+import tracemalloc
+from load_env import get_env_vars
+import matplotlib.pyplot as plt
+
+
+# PARSE ARGUMENTS
+parser = argparse.ArgumentParser()
+parser.add_argument('--exp_title', metavar='et', type=str, default='run')
+parser.add_argument('--curr_style', metavar='cs', type=str, default='FIXED')
+parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
+parser.add_argument('--pipeline', metavar='p', type=int, default=0)
+args = parser.parse_args()
+
+curr_file_path = Path(__file__)
+
+if bool(args.pipeline):
+    if args.env == 'CODE_OCEAN':
+        data, file_name = load_first_json(os.path.join(curr_file_path.parent.parent.parent, 'data'))
+    else:
+        data, file_name = load_first_json(os.path.join(curr_file_path.parent.parent.parent, 'results/rl_agent_outputs'))
+    args.curr_style = data['curr_style']
+    args.exp_title = file_name.replace('.json', '')
+
+# GET MACHINE ENV VARS
+env_vars = get_env_vars(args.env)
+
+# ENVIRONEMENT PARAMS
+PATCH_TYPES_PER_ENV = 3
+OBS_SIZE = PATCH_TYPES_PER_ENV + 1
+ACTION_SIZE = 2
+DWELL_TIME_FOR_REWARD = 6
+# for actual task, reward sites are 50 cm long and interreward sites are between 20 and 100, decay rate 0.05 (truncated exp.)
+REWARD_SITE_LEN = 2
+INTERREWARD_SITE_LEN_MEAN = 2
+REWARD_DECAY_CONSTS = [0, 10, 30]
+REWARD_PROB_PREFACTOR = 0.8
+# for actual task, interpatch lengths are 200 to 600 cm, decay rate 0.01 
+INTERPATCH_LEN = 6
+CURRICULUM_STYLE = args.curr_style
+INPUT_NOISE_STD = 0.1
+
+# AGENT PARAMS
+HIDDEN_SIZE = 128
+ATTR_POOL_SIZE = 15
+CRITIC_WEIGHT = 0.07846647668470078
+ENTROPY_WEIGHT = 1.0158892869509133e-06
+GAMMA = 0.9867118269299845
+LEARNING_RATE = 1e-4 #0.0006006712322528219
+
+# TRAINING PARAMS
+NUM_ENVS = 30
+N_SESSIONS = 20000
+N_UPDATES_PER_SESSION = 100
+N_STEPS_PER_UPDATE = 200
+
+# OTHER PARMS
+DEVICE = 'cuda'
+OUTPUT_STATE_SAVE_RATE = 1 # save one in 10 sessions
+if args.env == 'CODE_OCEAN':
+    OUTPUT_BASE_DIR = env_vars['RESULTS_PATH']
+else:
+    OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
+
+
+def interreward_site_transition():
+    return 1 + np.random.poisson(lam=INTERREWARD_SITE_LEN_MEAN - 1)
+
+
+def interpatch_transition():
+    return INTERPATCH_LEN
+
+
+def make_expected_treadmill_environment(env_idx):
+
+    def make_env():
+        np.random.seed(env_idx + NUM_ENVS)
+        
+        decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
+        if CURRICULUM_STYLE == 'MIXED':
+            np.random.shuffle(decay_consts_for_reward_funcs)
+
+        print('Begin stoch. treadmill')
+        print(decay_consts_for_reward_funcs)
+
+        patch_types = []
+        for i in range(PATCH_TYPES_PER_ENV):
+            decay_const_for_i = decay_consts_for_reward_funcs[i]
+            active = (decay_const_for_i != 0)
+            def reward_func(site_idx, decay_const_for_i=decay_const_for_i, active=active):
+                c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_const_for_i) if decay_const_for_i > 0 else 0
+                if active:
+                    return c
+                else:
+                    return 0
+            patch_types.append(
+                PatchType(
+                    reward_site_len=REWARD_SITE_LEN,
+                    interreward_site_len_func=interreward_site_transition,
+                    reward_func=reward_func,
+                    odor_num=i,
+                    reward_func_param=(decay_consts_for_reward_funcs[i] if active else 0.0),
+                )
+            )
+
+        transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
+
+        sesh = TreadmillSession(
+            patch_types=patch_types,
+            transition_mat=transition_mat,
+            interpatch_len_func=interpatch_transition,
+            dwell_time_for_reward=DWELL_TIME_FOR_REWARD,
+            obs_size=PATCH_TYPES_PER_ENV + 1,
+            verbosity=False,
+        )
+
+        return sesh
+
+    return make_env
+
+
+def make_stochastic_treadmill_environment(env_idx):
+
+    def make_env():
+        np.random.seed(env_idx + 3 * NUM_ENVS)
+        
+        decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
+        if CURRICULUM_STYLE == 'MIXED':
+            np.random.shuffle(decay_consts_for_reward_funcs)
+
+        print('Begin stoch. treadmill')
+        print(decay_consts_for_reward_funcs)
+
+        patch_types = []
+        for i in range(PATCH_TYPES_PER_ENV):
+            decay_const_for_i = decay_consts_for_reward_funcs[i]
+            active = (decay_const_for_i != 0)
+            def reward_func(site_idx, decay_const_for_i=decay_const_for_i, active=active):
+                c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_const_for_i) if decay_const_for_i > 0 else 0
+                if np.random.rand() < c and active:
+                    return 1
+                else:
+                    return 0
+            patch_types.append(
+                PatchType(
+                    reward_site_len=REWARD_SITE_LEN,
+                    interreward_site_len_func=interreward_site_transition,
+                    reward_func=reward_func,
+                    odor_num=i,
+                    reward_func_param=(decay_consts_for_reward_funcs[i] if active else 0.0),
+                )
+            )
+
+        transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
+
+        sesh = TreadmillSession(
+            patch_types=patch_types,
+            transition_mat=transition_mat,
+            interpatch_len_func=interpatch_transition,
+            dwell_time_for_reward=DWELL_TIME_FOR_REWARD,
+            obs_size=PATCH_TYPES_PER_ENV + 1,
+            verbosity=False,
+        )
+
+        return sesh
+
+    return make_env
+
+
+
+def objective(trial):
+    time_stamp = str(datetime.now()).replace(' ', '_').replace(':', '_').replace('.', '_')
+    output_dir = os.path.join(OUTPUT_BASE_DIR, '_'.join([args.exp_title, time_stamp]))
+    reward_rates_output_dir = os.path.join(output_dir, 'reward_rates')
+    info_output_dir = os.path.join(output_dir, 'state')
+    make_path_if_not_exists(reward_rates_output_dir)
+    make_path_if_not_exists(info_output_dir)
+
+    curricum = Curriculum(
+        curriculum_step_starts=[0],
+        curriculum_step_env_funcs=[
+            make_stochastic_treadmill_environment,
+        ],
+    )
+
+    env_seeds = np.arange(NUM_ENVS)
+    save_num = 0
+    last_snapshot = None
+
+    agent = GridSearchAgent(
+        n_envs=NUM_ENVS,
+        wait_time_for_reward=DWELL_TIME_FOR_REWARD - REWARD_SITE_LEN,
+        odor_cues_indices=(1, 4),
+        patch_cue_idx=0,
+        stop_ranges_per_patch=np.array([
+            [0, 0],
+            [3, 6],
+            [10, 17],
+        ], dtype=int),
+    )
+
+    for session_num in trange(N_SESSIONS, desc='Sessions'):
+
+        avg_rewards_per_update = np.empty((NUM_ENVS, N_UPDATES_PER_SESSION))
+        all_info = []
+        envs = curricum.get_envs_for_step(env_seeds)
+        # at the start of training reset all envs to get an initial state
+        # play n steps in our parallel environments to collect data
+        for update_num in trange(N_UPDATES_PER_SESSION, desc='Updates in session'):
+            if update_num == 0:
+                obs, info = envs.reset()
+
+            total_rewards = np.empty((NUM_ENVS, N_STEPS_PER_UPDATE))
+            for step in range(N_STEPS_PER_UPDATE):
+                action = agent.sample_action(obs)
+                obs, reward, terminated, truncated, info = envs.step(action.astype(int))
+                agent.append_reward(reward.astype('float32'))
+                total_rewards[:, step] = reward
+                all_info.append(info)
+
+            avg_rewards_per_update[:, update_num] = np.mean(total_rewards, axis=1)
+
+        padded_save_num = zero_pad(str(save_num), 5)
+        np.save(os.path.join(reward_rates_output_dir, f'{padded_save_num}.npy'), avg_rewards_per_update)
+        print('Avg reward for session:', np.mean(avg_rewards_per_update))
+        if session_num % OUTPUT_STATE_SAVE_RATE == 0 and session_num > 0:
+            try:
+                compressed_write(all_info, os.path.join(info_output_dir, f'{padded_save_num}.pkl'))
+            except MemoryError as me:
+                print('Pickle dump caused memory crash')
+                print(me)
+                pass
+        save_num += 1
+        agent.cue_session_end()
+        agent.reset_state()
+
+    final_value = avg_rewards_per_update.mean()
+    print('final_reward_total', final_value)
+
+    return final_value
+
+if __name__ == "__main__":
+    print(objective(None))
