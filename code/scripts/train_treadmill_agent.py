@@ -77,7 +77,7 @@ ATTR_POOL_SIZE = 15
 CRITIC_WEIGHT = 0.07846647668470078
 ENTROPY_WEIGHT = 1.0158892869509133e-06
 GAMMA = 0.9867118269299845
-LEARNING_RATE = 1e-4 #0.0006006712322528219
+LEARNING_RATE = 5e-5 #0.0006006712322528219
 
 # TRAINING PARAMS
 NUM_ENVS = 30
@@ -87,7 +87,7 @@ N_STEPS_PER_UPDATE = 200
 
 # OTHER PARMS
 DEVICE = 'cuda'
-OUTPUT_STATE_SAVE_RATE = 1 # save one in 10 sessions
+OUTPUT_STATE_SAVE_RATE = 50 # save one in 10 sessions
 if args.env == 'CODE_OCEAN':
     OUTPUT_BASE_DIR = env_vars['RESULTS_PATH']
 else:
@@ -327,7 +327,7 @@ def objective(trial, var_noise, activity_weight):
         padded_save_num = zero_pad(str(save_num), 5)
         np.save(os.path.join(reward_rates_output_dir, f'{padded_save_num}.npy'), avg_rewards_per_update)
         print('Avg reward for session:', np.mean(avg_rewards_per_update))
-        if session_num % OUTPUT_STATE_SAVE_RATE == 0 and session_num > 0:
+        if session_num % OUTPUT_STATE_SAVE_RATE == 0:
             try:
                 compressed_write(all_info, os.path.join(info_output_dir, f'{padded_save_num}.pkl'))
                 torch.save(

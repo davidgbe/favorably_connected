@@ -40,11 +40,11 @@ class GridSearchAgent():
         patch_start_cues_comp = patch_start_cues - last_patch_start_cues
         odor_cues_comp = odor_cues - last_odor_cues
 
-        self.odor_site_idx = np.where(patch_start_cues_comp > 0, 0, self.odor_site_idx)
-        self.rewards_in_patch = np.where(patch_start_cues_comp > 0, 0, self.rewards_in_patch)
+        self.odor_site_idx = np.where(patch_start_cues_comp > 0.5, 0, self.odor_site_idx)
+        self.rewards_in_patch = np.where(patch_start_cues_comp > 0.5, 0, self.rewards_in_patch)
 
-        self.current_patch_type = np.where(odor_cues.sum(axis=1) > 0, odor_cues.argmax(axis=1), self.current_patch_type)
-        current_odor_cue_off = np.array([odor_cues_comp[k, self.current_patch_type[k]] for k in range(self.n_envs)]) < 0
+        self.current_patch_type = np.where(odor_cues.max(axis=1) > 0.5, odor_cues.argmax(axis=1), self.current_patch_type)
+        current_odor_cue_off = np.array([odor_cues_comp[k, self.current_patch_type[k]] for k in range(self.n_envs)]) < 0.5
         self.odor_site_idx = np.where(current_odor_cue_off, self.odor_site_idx + 1, self.odor_site_idx)
 
         if self.search_finished:
@@ -54,7 +54,7 @@ class GridSearchAgent():
         else:
             stops_for_patch = self.n_stops_for_patch[self.current_patch_type]
 
-        odor_site_entered = np.array([odor_cues_comp[k, self.current_patch_type[k]] for k in range(self.n_envs)]) > 0
+        odor_site_entered = np.array([odor_cues_comp[k, self.current_patch_type[k]] for k in range(self.n_envs)]) > 0.5
 
         if self.strategy == 'site_count':
             should_stop = np.logical_and(self.odor_site_idx < stops_for_patch, odor_site_entered)
