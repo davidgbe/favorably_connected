@@ -80,7 +80,7 @@ GAMMA = 0.9867118269299845
 LEARNING_RATE = 1e-4 # 5e-5 #0.0006006712322528219
 
 # TRAINING PARAMS
-NUM_ENVS = 128
+NUM_ENVS = 64
 N_SESSIONS = 20000
 N_UPDATES_PER_SESSION = 100
 N_STEPS_PER_UPDATE = 200
@@ -265,9 +265,9 @@ def objective(trial, var_noise, activity_weight):
     optimizer = torch.optim.RMSprop(network.parameters(), lr=learning_rate)
 
     curricum = Curriculum(
-        curriculum_step_starts=[0, 20],
+        curriculum_step_starts=[0,],
         curriculum_step_env_funcs=[
-            make_deterministic_treadmill_environment,
+            # make_deterministic_treadmill_environment,
             make_stochastic_treadmill_environment,
         ],
     )
