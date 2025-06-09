@@ -16,7 +16,6 @@ from environments.curriculum import Curriculum
 from agents.networks.a2c_rnn_split import A2CRNN
 from agents.a2c_recurrent_agent_split import A2CRecurrentAgent
 from aux_funcs import zero_pad, make_path_if_not_exists, compressed_write, load_first_json, sample_truncated_exp
-import optuna
 from datetime import datetime
 import argparse
 import multiprocessing as mp
