@@ -24,6 +24,7 @@ from copy import deepcopy as copy
 import tracemalloc
 from load_env import get_env_vars
 import matplotlib.pyplot as plt
+from time import time
 
 
 # PARSE ARGUMENTS
@@ -301,6 +302,9 @@ def objective(trial, var_noise, activity_weight):
         # at the start of training reset all envs to get an initial state
         # play n steps in our parallel environments to collect data
         for update_num in trange(N_UPDATES_PER_SESSION, desc='Updates in session'):
+
+            # start = time()
+
             if update_num == 0:
                 obs, info = envs.reset()
 
@@ -311,6 +315,8 @@ def objective(trial, var_noise, activity_weight):
                 agent.append_reward(reward.astype('float32'))
                 total_rewards[:, step] = reward
                 all_info.append(info)
+
+            # print('Stepping time:', time() - start)
 
             avg_rewards_per_update[:, update_num] = np.mean(total_rewards, axis=1)
             total_loss, actor_loss, critic_loss, entropy_loss = agent.get_losses()
