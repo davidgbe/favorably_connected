@@ -15,8 +15,7 @@ from environments.components.patch_type import PatchType
 from environments.curriculum import Curriculum
 from agents.networks.a2c_rnn_split_vanilla import A2CRNN
 from agents.a2c_recurrent_agent_split import A2CRecurrentAgent
-from aux_funcs import zero_pad, make_path_if_not_exists, compressed_write, load_first_json
-import optuna
+from aux_funcs import zero_pad, make_path_if_not_exists, compressed_write, load_first_json, sample_truncated_exp
 from datetime import datetime
 import argparse
 import multiprocessing as mp
@@ -59,13 +58,17 @@ PATCH_TYPES_PER_ENV = 3
 OBS_SIZE = PATCH_TYPES_PER_ENV + 1
 ACTION_SIZE = 2
 DWELL_TIME_FOR_REWARD = 6
-MAX_REWARD_SITE_LEN = 2
-MIN_REWARD_SITE_LEN = 2
-INTERREWARD_SITE_LEN_MEAN = 2
+# for actual task, reward sites are 50 cm long and interreward sites are between 20 and 100, decay rate 0.05 (truncated exp.)
+REWARD_SITE_LEN = 3
+INTERREWARD_SITE_LEN_BOUNDS = [1, 6]
+INTEREWARD_SITE_LEN_DECAY_RATE = 0.8
 REWARD_DECAY_CONSTS = [0, 10, 30]
 REWARD_PROB_PREFACTOR = 0.8
-INTERPATCH_LEN = 6
+# for actual task, interpatch lengths are 200 to 600 cm, decay rate 0.01 
+INTERPATCH_LEN_BOUNDS = [1, 12]
+INTERPATCH_LEN_DECAY_RATE = 0.1
 CURRICULUM_STYLE = args.curr_style
+INPUT_NOISE_STD = 0.1
 
 # AGENT PARAMS
 HIDDEN_SIZE = 128
@@ -73,10 +76,10 @@ ATTR_POOL_SIZE = 15
 CRITIC_WEIGHT = 0.07846647668470078
 ENTROPY_WEIGHT = 1.0158892869509133e-06
 GAMMA = 0.9867118269299845
-LEARNING_RATE = 1e-4 #0.0006006712322528219
+LEARNING_RATE = 1e-4 # 5e-5 #0.0006006712322528219
 
 # TRAINING PARAMS
-NUM_ENVS = 30
+NUM_ENVS = 64
 N_SESSIONS = 20000
 N_UPDATES_PER_SESSION = 100
 N_STEPS_PER_UPDATE = 200
@@ -90,12 +93,26 @@ else:
     OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
 
 
+def interreward_site_transition():
+    return int(sample_truncated_exp(
+        size=1,
+        bounds=INTERREWARD_SITE_LEN_BOUNDS,
+        decay_rate=INTEREWARD_SITE_LEN_DECAY_RATE,
+    )[0])
+
+
+def interpatch_transition():
+    return int(sample_truncated_exp(
+        size=1,
+        bounds=INTERPATCH_LEN_BOUNDS,
+        decay_rate=INTERPATCH_LEN_DECAY_RATE,
+    )[0])
+
+
 def make_deterministic_treadmill_environment(env_idx):
 
     def make_env():
         np.random.seed(env_idx)
-        
-        reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
 
         print('Begin det. treadmill')
 
@@ -105,10 +122,10 @@ def make_deterministic_treadmill_environment(env_idx):
                 return 1
             patch_types.append(
                 PatchType(
-                    reward_site_len_for_patches[i],
-                    INTERREWARD_SITE_LEN_MEAN,
-                    reward_func,
-                    i,
+                    reward_site_len=REWARD_SITE_LEN,
+                    interreward_site_len_func=interreward_site_transition,
+                    reward_func=reward_func,
+                    odor_num=i,
                     reward_func_param=0.0,
                 )
             )
@@ -116,13 +133,14 @@ def make_deterministic_treadmill_environment(env_idx):
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
         sesh = TreadmillSession(
-            patch_types,
-            transition_mat,
-            INTERPATCH_LEN,
-            DWELL_TIME_FOR_REWARD,
+            patch_types=patch_types,
+            transition_mat=transition_mat,
+            interpatch_len_func=interpatch_transition,
+            dwell_time_for_reward=DWELL_TIME_FOR_REWARD,
             obs_size=PATCH_TYPES_PER_ENV + 1,
             verbosity=False,
         )
+
 
         return sesh
 
@@ -134,7 +152,6 @@ def make_stochastic_treadmill_environment(env_idx):
     def make_env():
         np.random.seed(env_idx + NUM_ENVS)
         
-        reward_site_len_for_patches = np.random.rand(PATCH_TYPES_PER_ENV) * (MAX_REWARD_SITE_LEN - MIN_REWARD_SITE_LEN) + MIN_REWARD_SITE_LEN
         decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
         if CURRICULUM_STYLE == 'MIXED':
             np.random.shuffle(decay_consts_for_reward_funcs)
@@ -154,10 +171,10 @@ def make_stochastic_treadmill_environment(env_idx):
                     return 0
             patch_types.append(
                 PatchType(
-                    reward_site_len_for_patches[i],
-                    INTERREWARD_SITE_LEN_MEAN,
-                    reward_func,
-                    i,
+                    reward_site_len=REWARD_SITE_LEN,
+                    interreward_site_len_func=interreward_site_transition,
+                    reward_func=reward_func,
+                    odor_num=i,
                     reward_func_param=(decay_consts_for_reward_funcs[i] if active else 0.0),
                 )
             )
@@ -165,10 +182,10 @@ def make_stochastic_treadmill_environment(env_idx):
         transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
 
         sesh = TreadmillSession(
-            patch_types,
-            transition_mat,
-            INTERPATCH_LEN,
-            DWELL_TIME_FOR_REWARD,
+            patch_types=patch_types,
+            transition_mat=transition_mat,
+            interpatch_len_func=interpatch_transition,
+            dwell_time_for_reward=DWELL_TIME_FOR_REWARD,
             obs_size=PATCH_TYPES_PER_ENV + 1,
             verbosity=False,
         )
@@ -208,45 +225,48 @@ def objective(trial, var_noise, activity_weight):
         var_noise=var_noise,
     )
 
-    if args.connectivity == 'HE':
-        w_rec = np.random.normal(size=(HIDDEN_SIZE, HIDDEN_SIZE), scale=np.sqrt(2 / HIDDEN_SIZE))
-        network.rnn.weight_hh.data = torch.from_numpy(w_rec).float().to(DEVICE)
-        network.rnn.bias_hh.data = torch.zeros((HIDDEN_SIZE)).float().to(DEVICE)
-
     if args.connectivity == 'LINE':
-        w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * (1 / np.sqrt(ATTR_POOL_SIZE))
+        w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * (1.5 / np.sqrt(ATTR_POOL_SIZE))
         w_line_attr = np.outer(w_line_attr_pc, w_line_attr_pc)
+        network.rnn.weight_hh.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_SIZE, : ATTR_POOL_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
 
-        network.rnn.weight_hh.data[:ATTR_POOL_SIZE, :ATTR_POOL_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
-        network.rnn.bias_hh.data[:ATTR_POOL_SIZE] = torch.zeros((ATTR_POOL_SIZE)).float().to(DEVICE)
-        network.rnn.weight_hh.data[:ATTR_POOL_SIZE, ATTR_POOL_SIZE:] = torch.zeros((ATTR_POOL_SIZE, HIDDEN_SIZE - ATTR_POOL_SIZE)).float().to(DEVICE)
+    if args.connectivity == 'LINE_PLUS_INPUT':
+        w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * (1.5 / np.sqrt(ATTR_POOL_SIZE))
+        w_line_attr = np.outer(w_line_attr_pc, w_line_attr_pc)
+        network.rnn.weight_hh.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_SIZE, : ATTR_POOL_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
 
-        network.critic_rnn.weight_hh.data[:ATTR_POOL_SIZE, :ATTR_POOL_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
-        network.critic_rnn.bias_hh.data[:ATTR_POOL_SIZE] = torch.zeros((ATTR_POOL_SIZE)).float().to(DEVICE)
-        network.critic_rnn.weight_hh.data[:ATTR_POOL_SIZE, ATTR_POOL_SIZE:] = torch.zeros((ATTR_POOL_SIZE, HIDDEN_SIZE - ATTR_POOL_SIZE)).float().to(DEVICE)
+        i = 2
+        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, :6] = torch.zeros((ATTR_POOL_SIZE, 6)).float().to(DEVICE)
+        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, 6] =  torch.from_numpy(w_line_attr_pc).float().to(DEVICE)
 
-    scale = 10
-    fig, axs = plt.subplots(1, 1, figsize=(1.5 * scale, 1 * scale))
+        i = 1
+        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, 1:] = torch.zeros((ATTR_POOL_SIZE, 6)).float().to(DEVICE)
+        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, 0] =  torch.from_numpy(w_line_attr_pc).float().to(DEVICE)
 
-    weight_hh = network.rnn.weight_hh.data.clone().detach().cpu().numpy()
-    m = np.max(np.abs(weight_hh))
-    cbar = axs.matshow(weight_hh, vmin=-m, vmax=m, cmap='bwr')
-    plt.colorbar(cbar)
-    fig.savefig(os.path.join(output_dir, f'weights.png'))
+        scale = 10
+        fig, axs = plt.subplots(1, 3, figsize=(4 * scale, 1 * scale))
 
-    weight_ih = network.rnn.weight_ih.data.clone().detach().cpu().numpy()
-    m = np.max(np.abs(weight_ih))
-    cbar = axs.matshow(weight_ih, vmin=-m, vmax=m, cmap='bwr')
-    plt.colorbar(cbar)
-    fig.savefig(os.path.join(output_dir, f'input_weights.png'))
+        weight_hh = network.rnn.weight_hh.data.clone().detach().cpu().numpy()
+        m = np.max(np.abs(weight_hh))
+        for k in range(3):
+            cbar = axs[k].matshow(weight_hh[k * HIDDEN_SIZE:(k+1) * HIDDEN_SIZE, :], vmin=-m, vmax=m, cmap='bwr')
+            plt.colorbar(cbar)
+        fig.savefig(os.path.join(output_dir, f'weights.png'))
+
+        weight_ih = network.rnn.weight_ih.data.clone().detach().cpu().numpy()
+        m = np.max(np.abs(weight_ih))
+        for k in range(3):
+            cbar = axs[k].matshow(weight_ih[k * HIDDEN_SIZE:(k+1) * HIDDEN_SIZE, :], vmin=-m, vmax=m, cmap='bwr')
+            plt.colorbar(cbar)
+        fig.savefig(os.path.join(output_dir, f'input_weights.png'))
 
 
     optimizer = torch.optim.RMSprop(network.parameters(), lr=learning_rate)
 
     curricum = Curriculum(
-        curriculum_step_starts=[0, 20],
+        curriculum_step_starts=[0,],
         curriculum_step_env_funcs=[
-            make_deterministic_treadmill_environment,
+            # make_deterministic_treadmill_environment,
             make_stochastic_treadmill_environment,
         ],
     )
@@ -268,6 +288,7 @@ def objective(trial, var_noise, activity_weight):
             learning_rate=learning_rate, # changed for Optuna
             activity_weight=activity_weight,
             optimizer=optimizer,
+            input_noise_std=INPUT_NOISE_STD,
         )
 
         total_losses = np.empty((N_UPDATES_PER_SESSION))
@@ -305,7 +326,7 @@ def objective(trial, var_noise, activity_weight):
         padded_save_num = zero_pad(str(save_num), 5)
         np.save(os.path.join(reward_rates_output_dir, f'{padded_save_num}.npy'), avg_rewards_per_update)
         print('Avg reward for session:', np.mean(avg_rewards_per_update))
-        if session_num % OUTPUT_STATE_SAVE_RATE == 0 and session_num > 0:
+        if session_num % OUTPUT_STATE_SAVE_RATE == 0:
             try:
                 compressed_write(all_info, os.path.join(info_output_dir, f'{padded_save_num}.pkl'))
                 torch.save(
