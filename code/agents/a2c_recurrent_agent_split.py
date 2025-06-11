@@ -43,7 +43,7 @@ class A2CRecurrentAgent:
         self.activities = []
 
         if optimizer is None:
-            self.optimizer = torch.optim.RMSprop(self.net.parameters(), lr=self.learning_rate)
+            self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.learning_rate)
         else:
             self.optimizer = optimizer
 
