@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
 parser.add_argument('--exp_title', metavar='et', type=str, default='run')
+parser.add_argument('--load_path', metavar='lp', type=str)
 parser.add_argument('--noise_var', metavar='nv', type=float, default=1e-4)
 parser.add_argument('--activity_reg', metavar='ar', type=float, default=1)
 parser.add_argument('--curr_style', metavar='cs', type=str, default='FIXED')
@@ -68,7 +69,7 @@ REWARD_PROB_PREFACTOR = 0.8
 INTERPATCH_LEN_BOUNDS = [1, 12]
 INTERPATCH_LEN_DECAY_RATE = 0.1
 CURRICULUM_STYLE = args.curr_style
-INPUT_NOISE_STD = 0.05
+INPUT_NOISE_STD = 0
 
 # AGENT PARAMS
 HIDDEN_SIZE = 128
@@ -76,21 +77,22 @@ ATTR_POOL_SIZE = 15
 CRITIC_WEIGHT = 0.07846647668470078
 ENTROPY_WEIGHT = 1.0158892869509133e-06
 GAMMA = 0.9867118269299845
-LEARNING_RATE = 2.5e-5 # 5e-5 #0.0006006712322528219
+LEARNING_RATE = 1e-4 # 5e-5 #0.0006006712322528219
 
 # TRAINING PARAMS
-NUM_ENVS = 64
-N_SESSIONS = 20000
+NUM_ENVS = 30
+N_SESSIONS = 8
 N_UPDATES_PER_SESSION = 100
 N_STEPS_PER_UPDATE = 200
 
 # OTHER PARMS
 DEVICE = 'cuda'
-OUTPUT_STATE_SAVE_RATE = 50 # save one in 10 sessions
+OUTPUT_STATE_SAVE_RATE = 1 # save one in 10 sessions
 if args.env == 'CODE_OCEAN':
     OUTPUT_BASE_DIR = env_vars['RESULTS_PATH']
 else:
     OUTPUT_BASE_DIR = os.path.join(env_vars['RESULTS_PATH'], 'rl_agent_outputs')
+DATA_BASE_DIR = env_vars['DATA_PATH']
 
 
 def interreward_site_transition():
@@ -201,10 +203,10 @@ def objective(trial, var_noise, activity_weight):
     output_dir = os.path.join(OUTPUT_BASE_DIR, '_'.join([args.exp_title, time_stamp, f'var_noise_{var_noise}', f'activity_weight_{activity_weight}']))
     reward_rates_output_dir = os.path.join(output_dir, 'reward_rates')
     info_output_dir = os.path.join(output_dir, 'state')
-    weights_output_dir = os.path.join(output_dir, 'rnn_weights')
+    hidden_state_output_dir = os.path.join(output_dir, 'hidden_state')
     make_path_if_not_exists(reward_rates_output_dir)
     make_path_if_not_exists(info_output_dir)
-    make_path_if_not_exists(weights_output_dir)
+    make_path_if_not_exists(hidden_state_output_dir)
 
     if trial is not None:
         gamma = trial.suggest_float('gamma', 0.9, 1.0)
@@ -225,41 +227,12 @@ def objective(trial, var_noise, activity_weight):
         var_noise=var_noise,
     )
 
-    if args.connectivity == 'LINE':
-        w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * (1.5 / np.sqrt(ATTR_POOL_SIZE))
-        w_line_attr = np.outer(w_line_attr_pc, w_line_attr_pc)
-        network.rnn.weight_hh.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_SIZE, : ATTR_POOL_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
-
-    if args.connectivity == 'LINE_PLUS_INPUT':
-        w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * (1.5 / np.sqrt(ATTR_POOL_SIZE))
-        w_line_attr = np.outer(w_line_attr_pc, w_line_attr_pc)
-        network.rnn.weight_hh.data[2 * HIDDEN_SIZE : 2 * HIDDEN_SIZE + ATTR_POOL_SIZE, : ATTR_POOL_SIZE] = torch.from_numpy(w_line_attr).float().to(DEVICE)
-
-        i = 2
-        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, :6] = torch.zeros((ATTR_POOL_SIZE, 6)).float().to(DEVICE)
-        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, 6] =  torch.from_numpy(w_line_attr_pc).float().to(DEVICE)
-
-        i = 1
-        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, 1:] = torch.zeros((ATTR_POOL_SIZE, 6)).float().to(DEVICE)
-        network.rnn.weight_ih.data[i * HIDDEN_SIZE : i * HIDDEN_SIZE + ATTR_POOL_SIZE, 0] =  torch.from_numpy(w_line_attr_pc).float().to(DEVICE)
-
-        scale = 10
-        fig, axs = plt.subplots(1, 3, figsize=(4 * scale, 1 * scale))
-
-        weight_hh = network.rnn.weight_hh.data.clone().detach().cpu().numpy()
-        m = np.max(np.abs(weight_hh))
-        for k in range(3):
-            cbar = axs[k].matshow(weight_hh[k * HIDDEN_SIZE:(k+1) * HIDDEN_SIZE, :], vmin=-m, vmax=m, cmap='bwr')
-            plt.colorbar(cbar)
-        fig.savefig(os.path.join(output_dir, f'weights.png'))
-
-        weight_ih = network.rnn.weight_ih.data.clone().detach().cpu().numpy()
-        m = np.max(np.abs(weight_ih))
-        for k in range(3):
-            cbar = axs[k].matshow(weight_ih[k * HIDDEN_SIZE:(k+1) * HIDDEN_SIZE, :], vmin=-m, vmax=m, cmap='bwr')
-            plt.colorbar(cbar)
-        fig.savefig(os.path.join(output_dir, f'input_weights.png'))
-
+    saved_checkpoint = torch.load(os.path.join(DATA_BASE_DIR, args.load_path).replace('\\','/'), weights_only=True)
+    if 'network_state_dict' in saved_checkpoint:
+        network.load_state_dict(saved_checkpoint['network_state_dict'])
+    else:
+        network.load_state_dict(saved_checkpoint)
+    network.eval()
 
     optimizer = torch.optim.RMSprop(network.parameters(), lr=learning_rate)
 
@@ -275,73 +248,57 @@ def objective(trial, var_noise, activity_weight):
     save_num = 0
     last_snapshot = None
 
-    for session_num in trange(N_SESSIONS, desc='Sessions'):
+    with torch.no_grad():
+        for session_num in trange(N_SESSIONS, desc='Sessions'):
 
-        agent = A2CRecurrentAgent(
-            network,
-            action_space_dims=ACTION_SIZE,
-            n_envs=NUM_ENVS,
-            device=DEVICE,
-            critic_weight=critic_weight, # changed for Optuna
-            entropy_weight=entropy_weight, # changed for Optuna
-            gamma=gamma, # changed for Optuna
-            learning_rate=learning_rate, # changed for Optuna
-            activity_weight=activity_weight,
-            optimizer=optimizer,
-            input_noise_std=INPUT_NOISE_STD,
-        )
+            agent = A2CRecurrentAgent(
+                network,
+                action_space_dims=ACTION_SIZE,
+                n_envs=NUM_ENVS,
+                device=DEVICE,
+                critic_weight=critic_weight, # changed for Optuna
+                entropy_weight=entropy_weight, # changed for Optuna
+                gamma=gamma, # changed for Optuna
+                learning_rate=learning_rate, # changed for Optuna
+                activity_weight=activity_weight,
+                optimizer=optimizer,
+                input_noise_std=INPUT_NOISE_STD,
+            )
 
-        total_losses = np.empty((N_UPDATES_PER_SESSION))
-        actor_losses = np.empty((N_UPDATES_PER_SESSION))
-        critic_losses = np.empty((N_UPDATES_PER_SESSION))
-        entropy_losses = np.empty((N_UPDATES_PER_SESSION))
-        avg_rewards_per_update = np.empty((NUM_ENVS, N_UPDATES_PER_SESSION))
-        all_info = []
-        envs = curricum.get_envs_for_step(env_seeds)
-        # at the start of training reset all envs to get an initial state
-        # play n steps in our parallel environments to collect data
-        for update_num in trange(N_UPDATES_PER_SESSION, desc='Updates in session'):
-            if update_num == 0:
-                obs, info = envs.reset()
+            avg_rewards_per_update = np.empty((NUM_ENVS, N_UPDATES_PER_SESSION))
+            all_info = []
+            envs = curricum.get_envs_for_step(env_seeds)
+            # at the start of training reset all envs to get an initial state
+            # play n steps in our parallel environments to collect data
+            for update_num in trange(N_UPDATES_PER_SESSION, desc='Updates in session'):
+                if update_num == 0:
+                    obs, info = envs.reset()
 
-            total_rewards = np.empty((NUM_ENVS, N_STEPS_PER_UPDATE))
-            for step in range(N_STEPS_PER_UPDATE):
-                action = agent.sample_action(obs).clone().detach().cpu().numpy()
-                obs, reward, terminated, truncated, info = envs.step(action)
-                agent.append_reward(reward.astype('float32'))
-                total_rewards[:, step] = reward
-                all_info.append(info)
+                total_rewards = np.empty((NUM_ENVS, N_STEPS_PER_UPDATE))
+                for step in range(N_STEPS_PER_UPDATE):
+                    action = agent.sample_action(obs).clone().detach().cpu().numpy()
+                    obs, reward, terminated, truncated, info = envs.step(action)
+                    agent.append_reward(reward.astype('float32'))
+                    total_rewards[:, step] = reward
+                    all_info.append(info)
 
-            avg_rewards_per_update[:, update_num] = np.mean(total_rewards, axis=1)
-            total_loss, actor_loss, critic_loss, entropy_loss = agent.get_losses()
-            agent.update(total_loss)
-            hidden_states, critic_hidden_states = agent.reset_state()
-            agent.set_state(hidden_states, critic_hidden_states)
+                avg_rewards_per_update[:, update_num] = np.mean(total_rewards, axis=1)
 
-            total_losses[update_num] = total_loss.detach().cpu().numpy()
-            actor_losses[update_num] = actor_loss.detach().cpu().numpy()
-            critic_losses[update_num] = critic_loss.detach().cpu().numpy()
-            entropy_losses[update_num] = entropy_loss.detach().cpu().numpy()
+            hidden_states_for_session = agent.get_hidden_state_activities().cpu()
 
-        padded_save_num = zero_pad(str(save_num), 5)
-        np.save(os.path.join(reward_rates_output_dir, f'{padded_save_num}.npy'), avg_rewards_per_update)
-        print('Avg reward for session:', np.mean(avg_rewards_per_update))
-        if session_num % OUTPUT_STATE_SAVE_RATE == 0:
-            try:
-                compressed_write(all_info, os.path.join(info_output_dir, f'{padded_save_num}.pkl'))
-                torch.save(
-                    {
-                        'network_state_dict': network.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                    },
-                    os.path.join(weights_output_dir, f'{padded_save_num}.pth')
-                )
-            except MemoryError as me:
-                print('Pickle dump caused memory crash')
-                print(me)
-                pass
-        save_num += 1
-        agent.reset_state()
+            padded_save_num = zero_pad(str(save_num), 5)
+            np.save(os.path.join(reward_rates_output_dir, f'{padded_save_num}.npy'), avg_rewards_per_update)
+            print('Avg reward for session:', np.mean(avg_rewards_per_update))
+            if session_num % OUTPUT_STATE_SAVE_RATE == 0:
+                try:
+                    compressed_write(all_info, os.path.join(info_output_dir, f'{padded_save_num}.pkl'))
+                    np.save(os.path.join(hidden_state_output_dir, f'{padded_save_num}.npy'), hidden_states_for_session)
+                except MemoryError as me:
+                    print('Pickle dump caused memory crash')
+                    print(me)
+                    pass
+            save_num += 1
+            agent.reset_state()
 
     final_value = avg_rewards_per_update.mean()
     print('final_reward_total', final_value)

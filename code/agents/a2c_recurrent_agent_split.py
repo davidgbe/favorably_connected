@@ -183,6 +183,7 @@ class A2CRecurrentAgent:
             total_loss, _, _, _ = self.get_losses()
         self.optimizer.zero_grad()
         total_loss.backward(retain_graph=retain_graph)
+        torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=0.5)
         self.optimizer.step()
         
         
