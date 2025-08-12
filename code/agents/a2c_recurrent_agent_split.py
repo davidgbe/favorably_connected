@@ -65,8 +65,8 @@ class A2CRecurrentAgent:
         past_action_one_hot = self.get_last_action_one_hot()
         past_reward = self.get_last_reward()
 
-        # input will be [n_envs, (obs_size + action_size + 2)]
-        # the 2 is for reward and time
+        # input will be [n_envs, (obs_size + action_size + 1)]
+        # the 1 is for reward and time
         inputs = torch.cat((
             obs, past_action_one_hot, past_reward.unsqueeze(dim=1)
         ), dim=1)

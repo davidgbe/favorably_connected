@@ -48,8 +48,9 @@ class A2CRNN(nn.Module):
         self.var_noise = var_noise
     
     def reset_state(self):
-        hidden_states = self.hidden_states.detach().cpu()
-        critic_hidden_states = self.critic_hidden_states.detach().cpu()
+        if self.hidden_states is not None:
+            hidden_states = self.hidden_states.detach().cpu()
+            critic_hidden_states = self.critic_hidden_states.detach().cpu()
         self.hidden_states = None
         self.critic_hidden_states = None
         return hidden_states, critic_hidden_states

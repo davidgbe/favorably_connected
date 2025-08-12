@@ -6,7 +6,10 @@ import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 import warnings
 import pickle
-import blosc
+try:
+    import blosc
+except ModuleNotFoundError as e:
+    import blosc2 as blosc
 import os
 import json
 from numpy.linalg import norm
@@ -192,7 +195,7 @@ def format_plot(
     topspine=False,
     bottomspine=True,
     ):
-    print(axs)
+    
     if type(axs) is not list and type(axs) is not np.array and type(axs) is not np.ndarray:
         axs = [axs]
 
@@ -212,6 +215,8 @@ def format_plot(
 
         ax.xaxis.label.set_size(axislabelsize)
         ax.yaxis.label.set_size(axislabelsize)
+
+        ax.xaxis.set_ticks_position('bottom')
 
 
 def add_pc_axes(axs):

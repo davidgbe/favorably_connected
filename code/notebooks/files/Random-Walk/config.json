@@ -1,0 +1,1 @@
+{"hidden_size": 300, "lr": 0.001, "batch_size": 100, "seq_len": 30, "envid": "Random-Walk"}

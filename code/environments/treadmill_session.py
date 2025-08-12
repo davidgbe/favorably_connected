@@ -41,9 +41,12 @@ class TreadmillSession(gym.Env):
     # begin gymnasium specific API
     # note: these functions simply wrap other functions defined later on
 
-    def reset(self, seed=None, options=None):
+    def reset(self, seed=None, options=None, first_patch_start=None):
         super().reset(seed=seed)
-        self.start_new_session()
+        if first_patch_start is not None:
+            self.start_new_session(first_patch_start=first_patch_start)
+        else:
+            self.start_new_session()
 
         return self.get_observations(), {}
 

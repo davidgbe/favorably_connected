@@ -64,6 +64,7 @@ REWARD_SITE_LEN = 3
 INTERREWARD_SITE_LEN_BOUNDS = [1, 6]
 INTEREWARD_SITE_LEN_DECAY_RATE = 0.8
 REWARD_DECAY_CONSTS = [0, 10, 30]
+REWARD_DECAY_RANGE = [0, 30]
 REWARD_PROB_PREFACTOR = 0.8
 # for actual task, interpatch lengths are 200 to 600 cm, decay rate 0.01 
 INTERPATCH_LEN_BOUNDS = [1, 12]
@@ -154,9 +155,14 @@ def make_stochastic_treadmill_environment(env_idx):
     def make_env():
         np.random.seed(env_idx + NUM_ENVS)
         
-        decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
-        if CURRICULUM_STYLE == 'MIXED':
-            np.random.shuffle(decay_consts_for_reward_funcs)
+        if CURRICULUM_STYLE == 'MIXED' or CURRICULUM_STYLE == 'FIXED':
+            decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
+            if CURRICULUM_STYLE == 'MIXED':
+                np.random.shuffle(decay_consts_for_reward_funcs)
+        elif CURRICULUM_STYLE == 'INDEP':
+            decay_consts_for_reward_funcs = np.random.rand(3) * REWARD_DECAY_RANGE[1] + REWARD_DECAY_RANGE[0]
+        else:
+            raise NotImplementedError('CURRICULUM_STYLE not found!')
 
         print('Begin stoch. treadmill')
         print(decay_consts_for_reward_funcs)
@@ -168,7 +174,7 @@ def make_stochastic_treadmill_environment(env_idx):
             def reward_func(site_idx, decay_const_for_i=decay_const_for_i, active=active):
                 c = REWARD_PROB_PREFACTOR * np.exp(-site_idx / decay_const_for_i) if decay_const_for_i > 0 else 0
                 if np.random.rand() < c and active:
-                    return 1
+                    return 0
                 else:
                     return 0
             patch_types.append(

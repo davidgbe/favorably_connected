@@ -13,7 +13,8 @@ from tqdm.auto import trange
 from environments.treadmill_session import TreadmillSession
 from environments.components.patch_type import PatchType
 from environments.curriculum import Curriculum
-from agents.networks.a2c_rnn_split_vanilla import A2CRNN
+from agents.networks.a2c_rnn_split_vanilla import A2CRNN as VanillaA2CRNN
+from agents.networks.a2c_rnn_split import A2CRNN
 from agents.a2c_recurrent_agent_split import A2CRecurrentAgent
 from aux_funcs import zero_pad, make_path_if_not_exists, compressed_write, load_first_json, sample_truncated_exp
 from datetime import datetime
@@ -35,6 +36,7 @@ parser.add_argument('--curr_style', metavar='cs', type=str, default='FIXED')
 parser.add_argument('--env', metavar='e', type=str, default='LOCAL')
 parser.add_argument('--agent_type', metavar='at', type=str, default='split')
 parser.add_argument('--connectivity', metavar='at', type=str, default='VANILLA')
+parser.add_argument('--rnn_type', metavar='rt', type=str, default='VANILLA')
 parser.add_argument('--pipeline', metavar='p', type=int, default=0)
 args = parser.parse_args()
 
@@ -63,6 +65,7 @@ REWARD_SITE_LEN = 3
 INTERREWARD_SITE_LEN_BOUNDS = [1, 6]
 INTEREWARD_SITE_LEN_DECAY_RATE = 0.8
 REWARD_DECAY_CONSTS = [0, 10, 30]
+REWARD_DECAY_RANGE = [0, 30]
 REWARD_PROB_PREFACTOR = 0.8
 # for actual task, interpatch lengths are 200 to 600 cm, decay rate 0.01 
 INTERPATCH_LEN_BOUNDS = [1, 12]
@@ -152,9 +155,14 @@ def make_stochastic_treadmill_environment(env_idx):
     def make_env():
         np.random.seed(env_idx + NUM_ENVS)
         
-        decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
-        if CURRICULUM_STYLE == 'MIXED':
-            np.random.shuffle(decay_consts_for_reward_funcs)
+        if CURRICULUM_STYLE == 'MIXED' or CURRICULUM_STYLE == 'FIXED':
+            decay_consts_for_reward_funcs = copy(REWARD_DECAY_CONSTS)
+            if CURRICULUM_STYLE == 'MIXED':
+                np.random.shuffle(decay_consts_for_reward_funcs)
+        elif CURRICULUM_STYLE == 'INDEP':
+            decay_consts_for_reward_funcs = np.random.rand(3) * REWARD_DECAY_RANGE[1] + REWARD_DECAY_RANGE[0]
+        else:
+            raise NotImplementedError('CURRICULUM_STYLE not found!')
 
         print('Begin stoch. treadmill')
         print(decay_consts_for_reward_funcs)
@@ -217,13 +225,24 @@ def objective(trial, var_noise, activity_weight):
         critic_weight = CRITIC_WEIGHT
         entropy_weight = ENTROPY_WEIGHT
 
-    network = A2CRNN(
-        input_size=OBS_SIZE + ACTION_SIZE + 1,
-        action_size=ACTION_SIZE,
-        hidden_size=HIDDEN_SIZE,
-        device=DEVICE,
-        var_noise=var_noise,
-    )
+    if args.rnn_type == 'VANILLA':
+        network = VanillaA2CRNN(
+            input_size=OBS_SIZE + ACTION_SIZE + 1,
+            action_size=ACTION_SIZE,
+            hidden_size=HIDDEN_SIZE,
+            device=DEVICE,
+            var_noise=var_noise,
+        )
+    elif args.rnn_type == 'GRU':
+        network = A2CRNN(
+            input_size=OBS_SIZE + ACTION_SIZE + 1,
+            action_size=ACTION_SIZE,
+            hidden_size=HIDDEN_SIZE,
+            device=DEVICE,
+            var_noise=var_noise,
+        )
+    else:
+        raise ValueError(f'Couldn\'t find RNN type: {args.rnn_type}')
 
     if args.connectivity == 'LINE':
         w_line_attr_pc = np.ones((ATTR_POOL_SIZE)) * (1.5 / np.sqrt(ATTR_POOL_SIZE))
@@ -259,7 +278,6 @@ def objective(trial, var_noise, activity_weight):
             cbar = axs[k].matshow(weight_ih[k * HIDDEN_SIZE:(k+1) * HIDDEN_SIZE, :], vmin=-m, vmax=m, cmap='bwr')
             plt.colorbar(cbar)
         fig.savefig(os.path.join(output_dir, f'input_weights.png'))
-
 
     optimizer = torch.optim.RMSprop(network.parameters(), lr=learning_rate)
 
