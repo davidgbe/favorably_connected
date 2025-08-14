@@ -200,7 +200,7 @@ class TreadmillSession(gym.Env):
 
     def get_observations(self):
         # observations entirely determined by location
-        # there are 2 visual cues plus odor cues equal to the number of patchs
+        # there is 1 visual cue plus odor cues equal to the number of patchs
 
         # begin with a noisy vector around all zeros is there is noise in observations
         observations = np.random.normal(loc=0, size=self.obs_size, scale=self.obs_noise_std)
