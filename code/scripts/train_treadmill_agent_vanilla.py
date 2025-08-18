@@ -112,44 +112,6 @@ def interpatch_transition():
     )[0])
 
 
-def make_deterministic_treadmill_environment(env_idx):
-
-    def make_env():
-        np.random.seed(env_idx)
-
-        print('Begin det. treadmill')
-
-        patch_types = []
-        for i in range(PATCH_TYPES_PER_ENV):
-            def reward_func(site_idx):
-                return 1
-            patch_types.append(
-                PatchType(
-                    reward_site_len=REWARD_SITE_LEN,
-                    interreward_site_len_func=interreward_site_transition,
-                    reward_func=reward_func,
-                    odor_num=i,
-                    reward_func_param=0.0,
-                )
-            )
-
-        transition_mat = 1/3 * np.ones((PATCH_TYPES_PER_ENV, PATCH_TYPES_PER_ENV))
-
-        sesh = TreadmillSession(
-            patch_types=patch_types,
-            transition_mat=transition_mat,
-            interpatch_len_func=interpatch_transition,
-            dwell_time_for_reward=DWELL_TIME_FOR_REWARD,
-            obs_size=PATCH_TYPES_PER_ENV + 1,
-            verbosity=False,
-        )
-
-
-        return sesh
-
-    return make_env
-
-
 def make_stochastic_treadmill_environment(env_idx):
 
     def make_env():
@@ -284,7 +246,6 @@ def objective(trial, var_noise, activity_weight):
     curricum = Curriculum(
         curriculum_step_starts=[0,],
         curriculum_step_env_funcs=[
-            # make_deterministic_treadmill_environment,
             make_stochastic_treadmill_environment,
         ],
     )
