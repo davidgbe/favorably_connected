@@ -207,7 +207,7 @@ def collect_trajectory(
     
     network = A2CRNNFlax(
         action_size=2,  # Fixed ACTION_SIZE
-        hidden_size=128,  # This should come from config
+        hidden_size=16,  # This should come from config
         var_noise=1e-4,   # This should come from config  
     )
     
@@ -581,7 +581,7 @@ def main():
         n_sessions=2500,  # Shorter for testing
         num_envs=60,  # Smaller for testing
         learning_rate=1e-4,
-        hidden_size=128,
+        hidden_size=16,
         output_state_save_rate=20,
     )
 
