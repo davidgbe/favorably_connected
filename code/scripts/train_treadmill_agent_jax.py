@@ -1,4 +1,5 @@
 import sys
+import os
 from pathlib import Path
 
 if __name__ == '__main__':
@@ -16,14 +17,44 @@ if not hasattr(jnp, 'DeviceArray'):
 
 from jax import random, lax
 import chex
-from flax import struct
+from flax import struct, serialization
 from flax.training import checkpoints
 from flax import linen as nn
+from flax.traverse_util import flatten_dict
 import optax
 from typing import Tuple, Dict, Any, Optional
 from functools import partial
 import numpy as np
 from tqdm.auto import trange
+import argparse
+import pickle
+from datetime import datetime
+from agents.a2c_rnn_flax import A2CRNNFlax
+
+# Import your existing JAX environment
+from environments.treadmill_env_jax import (
+    TreadmillEnvironment, 
+    TreadmillEnvParams, 
+    TreadmillEnvState, 
+    treadmill_session_default_params
+)
+
+# PARSE ARGUMENTS
+parser = argparse.ArgumentParser()
+parser.add_argument('--exp_title', metavar='et', type=str, default='run')
+parser.add_argument('--noise_var', metavar='nv', type=float, default=1e-4)
+parser.add_argument('--activity_reg', metavar='ar', type=float, default=1)
+parser.add_argument('--curr_style', metavar='cs', type=str, default='fixed')
+parser.add_argument('--reward_func', metavar='rf', type=str, default='exp')
+parser.add_argument('--agent_type', metavar='at', type=str, default='split')
+parser.add_argument('--rnn_type', metavar='rt', type=str, default='VANILLA')
+parser.add_argument('--seed', metavar='s', type=int, default=0)
+# New test mode arguments
+parser.add_argument('--test', action='store_true', help='Run in test/evaluation mode')
+parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to checkpoint for testing')
+parser.add_argument('--test_sessions', type=int, default=30, help='Number of episodes to run in test mode')
+parser.add_argument('--save_trajectories', action='store_true', help='Save trajectory data during testing')
+args = parser.parse_args()
 
 # Import your existing JAX environment
 from environments.treadmill_env_jax import (
@@ -49,79 +80,6 @@ class TrainState:
     prev_reward: jnp.ndarray   # (NUM_ENVS,)
     learning_rate: float
     grads: jnp.ndarray
-
-
-class A2CRNNFlax(nn.Module):
-    """Flax implementation of A2C RNN network"""
-    action_size: int
-    hidden_size: int
-    rnn_type: str = 'GRU'  # 'VANILLA' or 'GRU'
-    var_noise: float = 1e-4
-    
-    def setup(self):
-        if self.rnn_type == 'VANILLA':
-            self.rnn_actor = VanillaRNNCell(self.hidden_size, self.var_noise)
-            self.rnn_critic = VanillaRNNCell(self.hidden_size, self.var_noise)
-        elif self.rnn_type == 'GRU':
-            self.rnn_actor = nn.GRUCell(self.hidden_size)
-            self.rnn_critic = nn.GRUCell(self.hidden_size)
-        else:
-            raise ValueError(f"Unknown RNN type: {self.rnn_type}")
-            
-        # Actor and critic heads
-        self.actor = nn.Dense(self.action_size)
-        self.critic = nn.Dense(1)
-        
-    def __call__(self, x, actor_hidden, critic_hidden):
-        """
-        Args:
-            x: input (batch_size, input_dim)
-            actor_hidden: (batch_size, hidden_size) 
-            critic_hidden: (batch_size, hidden_size)
-        Returns:
-            logits, value, new_actor_hidden, new_critic_hidden
-        """
-        # Actor RNN
-        new_actor_hidden, actor_outputs = self.rnn_actor(actor_hidden, x)
-        logits = self.actor(actor_outputs)
-        
-        # Critic RNN  
-        new_critic_hidden, critic_outputs = self.rnn_critic(critic_hidden, x)
-        value = self.critic(critic_outputs).squeeze(-1)
-        
-        return logits, value, new_actor_hidden, new_critic_hidden
-
-
-class VanillaRNNCell(nn.Module):
-    """Vanilla RNN cell with noise injection matching PyTorch implementation"""
-    hidden_size: int
-    var_noise: float = 0
-    
-    def setup(self):
-        self.input_projection = nn.Dense(self.hidden_size, use_bias=True)
-        self.hidden_projection = nn.Dense(self.hidden_size, use_bias=True)
-        
-    def __call__(self, x, hidden):
-        """
-        Args:
-            x: input (batch_size, input_dim)
-            hidden: previous hidden state (batch_size, hidden_size)
-        Returns:
-            new_hidden: (batch_size, hidden_size)
-        """
-        input_contrib = self.input_projection(x)
-        hidden_contrib = self.hidden_projection(hidden)
-        
-        # Add noise like in PyTorch version
-        if self.var_noise > 0:
-            noise = random.normal(
-                self.make_rng('noise'), 
-                hidden_contrib.shape
-            ) * jnp.sqrt(self.var_noise)
-            hidden_contrib = hidden_contrib + noise
-            
-        new_hidden = input_contrib + hidden_contrib
-        return new_hidden
 
 
 def create_train_state(
@@ -158,9 +116,15 @@ def create_train_state(
         dummy_hidden, 
         dummy_hidden
     )
+
+    for k, v in flatten_dict(params['params']).items():
+        print(k, v.shape)
     
-    # Initialize optimizer
-    optimizer = optax.rmsprop(learning_rate)
+    # Initialize otptimizer
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(0.15),   # try values 0.3 – 1.0 depending on stability
+        optax.adam(learning_rate),
+    )
     opt_state = optimizer.init(params)
     
     # Initialize hidden states for all environments
@@ -189,6 +153,17 @@ def create_train_state(
 @struct.dataclass
 class TrajectoryData:
     """Data collected during trajectory rollout"""
+    action: jnp.ndarray
+    current_patch_num: jnp.ndarray
+    current_position: jnp.ndarray
+    current_patch_start: jnp.ndarray
+    agent_in_patch: jnp.ndarray
+    reward_bounds: jnp.ndarray
+    reward_site_idx: jnp.ndarray
+    current_reward_site_attempted: jnp.ndarray
+    patch_reward_param: jnp.ndarray
+    reward: jnp.ndarray
+
     observations: jnp.ndarray  # (num_envs, n_steps, obs_size)
     actions: jnp.ndarray       # (num_envs, n_steps)
     rewards: jnp.ndarray       # (num_envs, n_steps)
@@ -197,18 +172,24 @@ class TrajectoryData:
     dones: jnp.ndarray        # (num_envs, n_steps)
 
 
+@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'n_steps'])
 def collect_trajectory(
     train_state: TrainState,
     env_states: TreadmillEnvState, 
     env_params: TreadmillEnvParams,
     input_noise_std: float,
+    var_noise: float,
+    rnn_type: str,
+    hidden_size: int,
+    n_steps: int,
 ) -> Tuple[TrajectoryData, TrainState, TreadmillEnvState]:
     """Collect trajectory using lax.scan over time steps"""
     
     network = A2CRNNFlax(
         action_size=2,  # Fixed ACTION_SIZE
-        hidden_size=16,  # This should come from config
-        var_noise=1e-4,   # This should come from config  
+        hidden_size=hidden_size,  # This should come from config
+        var_noise=var_noise,   # This should come from config,
+        rnn_type=rnn_type,
     )
     
     reset_fn, step_fn, get_obs_fn = TreadmillEnvironment()
@@ -275,7 +256,7 @@ def collect_trajectory(
             'logits': logits,
             'values': values,
             'dones': dones,
-        }
+        } | infos
         
         return (new_train_state, new_env_states), step_data
     
@@ -284,7 +265,7 @@ def collect_trajectory(
         scan_step,
         (train_state, env_states),
         None,
-        length=N_STEPS_PER_UPDATE  # Now a compile-time constant
+        length=n_steps  # Now a compile-time constant
     )
     
     # Reshape trajectory data from (n_steps, num_envs, ...) to (num_envs, n_steps, ...)
@@ -306,6 +287,9 @@ def compute_a2c_loss(
     critic_weight: float,
     entropy_weight: float,
     input_noise_std: float,
+    var_noise: float,
+    rnn_type: str,
+    hidden_size: int,
 ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
     """Compute A2C loss by calling collect_trajectory with the params argument"""
     
@@ -318,22 +302,27 @@ def compute_a2c_loss(
         env_states,
         env_params,
         input_noise_std,
+        var_noise,
+        rnn_type,
+        hidden_size,
+        N_STEPS_PER_UPDATE,
     )
     
     # Now compute loss using the collected trajectory
     returns = jax.vmap(compute_n_step_returns, (0, None,))(trajectory.rewards, gamma)
     advantages = returns - trajectory.values
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     
     # Actor loss (policy gradient)
     probs = jax.nn.softmax(trajectory.logits)
     log_probs = jnp.log(probs + 1e-8)
     chosen_log_probs = jnp.take_along_axis(
         log_probs,
-        trajectory.actions[..., None],
+        jax.lax.stop_gradient(trajectory.actions[..., None]),
         axis=-1
     ).squeeze(-1)
     
-    actor_loss = -jnp.mean(chosen_log_probs * advantages)
+    actor_loss = -jnp.mean(chosen_log_probs * jax.lax.stop_gradient(advantages))
     
     # Critic loss
     critic_loss = jnp.mean(advantages ** 2)
@@ -384,7 +373,7 @@ def compute_n_step_returns(rewards, gamma):
     return returns
 
 
-@partial(jax.jit, static_argnames=['rnn_type'])
+@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size'])
 def train_step(
     train_state: TrainState,
     env_states: TreadmillEnvState,
@@ -411,10 +400,18 @@ def train_step(
         critic_weight,
         entropy_weight,
         input_noise_std,
+        var_noise,
+        rnn_type,
+        hidden_size,
     )
+
+    metrics['grad_norm'] = optax.global_norm(grads)
     
     # Apply updates
-    optimizer = optax.rmsprop(train_state.learning_rate)
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(0.15),   # try values 0.3 – 1.0 depending on stability
+        optax.adam(train_state.learning_rate),
+    )
     updates, new_opt_state = optimizer.update(
         grads, train_state.opt_state, train_state.params
     )
@@ -425,12 +422,15 @@ def train_step(
     final_env_states = metrics['final_env_states']
     
     # Update training state
-    new_train_state = final_train_state.replace(
+    final_train_state = final_train_state.replace(
         params=new_params,
         opt_state=new_opt_state,
     )
+
+    final_train_state = jax.tree_util.tree_map(lax.stop_gradient, final_train_state)
+    final_env_states = jax.tree_util.tree_map(lax.stop_gradient, final_env_states)
     
-    return new_train_state, final_env_states, metrics
+    return final_train_state, final_env_states, metrics
 
 
 # Compile-time constants for JAX JIT compatibility
@@ -448,12 +448,14 @@ class TrainingConfig:
     dwell_time_for_reward: int = 6
     reward_site_len: int = 3
     input_noise_std: float = 0.05
+    reward_param_style: int = 0
+    reward_func_type: int = 0
     
     # Agent params  
     hidden_size: int = 128
     critic_weight: float = 0.0785
-    entropy_weight: float = 1.016e-06
-    gamma: float = 0.987
+    entropy_weight: float = 1.02e-6 # 1.02e-06
+    gamma: float = 0.997 # 0.987
     learning_rate: float = 2.5e-5
     var_noise: float = 1e-4
     rnn_type: str = 'GRU'
@@ -465,8 +467,53 @@ class TrainingConfig:
     output_state_save_rate: int = 100
 
 
+@partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'var_noise', 'rnn_type'])
+def run_session_updates_with_metrics(
+    train_state: TrainState,
+    env_states: TreadmillEnvState,
+    env_params: TreadmillEnvParams,
+    gamma: float,
+    critic_weight: float,
+    entropy_weight: float,
+    input_noise_std: float,
+    action_size: int,
+    hidden_size: int,
+    var_noise: float,
+    rnn_type: str,
+) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
+    """Run all training updates with full metrics collection"""
+    
+    def update_step(carry, _):
+        train_state, env_states = carry
+        
+        new_train_state, new_env_states, metrics = train_step(
+            train_state=train_state,
+            env_states=env_states, 
+            env_params=env_params,
+            gamma=gamma,
+            critic_weight=critic_weight,
+            entropy_weight=entropy_weight,
+            input_noise_std=input_noise_std,
+            action_size=action_size,
+            hidden_size=hidden_size,
+            var_noise=var_noise,
+            rnn_type=rnn_type,
+        )
+        
+        return (new_train_state, new_env_states), metrics
+    
+    # Run scan over all updates
+    (final_train_state, final_env_states), all_metrics = lax.scan(
+        update_step,
+        (train_state, env_states),
+        None,
+        length=N_UPDATES_PER_SESSION,
+    )
+    
+    return final_train_state, final_env_states, all_metrics
 
-def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: bool = False):
+
+def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: bool = True):
     """Main training function that matches your existing structure"""
     
     if config is None:
@@ -479,8 +526,12 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
     print(f"Steps per update: {N_STEPS_PER_UPDATE}")
     
     # Initialize everything
-    rng_key = random.PRNGKey(0)
+    rng_key = random.key(args.seed)
     env_params = treadmill_session_default_params()
+    env_params = env_params.replace(
+        reward_param_style=config.reward_param_style,
+        reward_func_type=config.reward_func_type,
+    )
     
     # Create training state
     train_state = create_train_state(
@@ -524,33 +575,24 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
         avg_rewards_per_update = np.empty((config.num_envs, N_UPDATES_PER_SESSION))
         all_info = []
         
-        for update_num in range(N_UPDATES_PER_SESSION):
-            
-            # JITted training step
-            if train:
-                train_state, env_states, metrics = train_step(
-                    train_state=train_state,
-                    env_states=env_states, 
-                    env_params=env_params,
-                    gamma=config.gamma,
-                    critic_weight=config.critic_weight,
-                    entropy_weight=config.entropy_weight,
-                    input_noise_std=config.input_noise_std,
-                    action_size=config.action_size,
-                    hidden_size=config.hidden_size,
-                    var_noise=config.var_noise,
-                    rnn_type=config.rnn_type,
-                )
-                # Extract metrics for logging (numpy conversion happens here)
-                avg_rewards_per_update[:, update_num] = np.array(metrics['mean_reward'])
-            else:
-                # if train is False, surface entire 'trajectory' object to be saved
-                trajectory, train_state, env_states = collect_trajectory(
-                    train_state, env_states, env_params, config.input_noise_std
-                )
-            
-            # Could add more detailed info logging here if needed
-            # all_info.append(some_info_from_metrics)
+        train_state, env_states, all_metrics = run_session_updates_with_metrics(
+            train_state=train_state,
+            env_states=env_states, 
+            env_params=env_params,
+            gamma=config.gamma,
+            critic_weight=config.critic_weight,
+            entropy_weight=config.entropy_weight,
+            input_noise_std=config.input_noise_std,
+            action_size=config.action_size,
+            hidden_size=config.hidden_size,
+            var_noise=config.var_noise,
+            rnn_type=config.rnn_type,
+        )
+
+        avg_rewards_per_update = all_metrics['mean_reward']
+        grad_norms = all_metrics['grad_norm']
+        print('mean:', jnp.mean(grad_norms), 'std:', jnp.std(grad_norms))
+
             
         # Session-level logging
         session_mean_reward = np.mean(avg_rewards_per_update)
@@ -561,40 +603,207 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
         # Periodic saving (matching your original save rate)
         if session_num % config.output_state_save_rate == 0:
             print(f"Would save checkpoint at session {session_num}")
-            save_dir = Path("checkpoints").resolve()  # makes it absolute
+            save_dir = Path(f"checkpoints/{args.exp_title}").resolve()  # makes it absolute
             checkpoints.save_checkpoint(
                 ckpt_dir=str(save_dir),
                 target={"params": train_state.params},  # or just train_state
                 step=session_num,
-                overwrite=False, # allows overwriting instead of accumulating
+                overwrite=True, # allows overwriting instead of accumulating
+                keep=100,
             )
     
     print("Training completed!")
     return train_state, all_session_rewards
 
 
-def main():
-    """Entry point for training"""
+def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajectories: bool = False):
+    """Evaluate trained A2C agent without gradient updates"""
     
-    # You can customize the config here
-    config = TrainingConfig(
-        n_sessions=2500,  # Shorter for testing
-        num_envs=60,  # Smaller for testing
-        learning_rate=1e-4,
-        hidden_size=16,
-        output_state_save_rate=20,
+    print("Starting JAX A2C Evaluation...")
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    print(f"Num episodes: {config.n_sessions}")
+    print(f"Save trajectories: {save_trajectories}")
+    
+    # Initialize everything
+    rng_key = random.key(args.seed)
+    env_params = treadmill_session_default_params()
+    env_params = env_params.replace(
+        reward_param_style=config.reward_param_style,
+        reward_func_type=config.reward_func_type,
     )
 
-    print(config)
+    session_steps = N_UPDATES_PER_SESSION * N_STEPS_PER_UPDATE
     
-    print("Starting JAX A2C training with test configuration...")
+    # Create training state (just for structure, won't be updated)
+    train_state = create_train_state(
+        rng_key=rng_key,
+        obs_size=config.obs_size,
+        action_size=config.action_size,
+        hidden_size=config.hidden_size,
+        num_envs=1,  # Use single environment for cleaner episode tracking
+        learning_rate=config.learning_rate,  # Won't be used
+        rnn_type=config.rnn_type,
+        var_noise=config.var_noise,
+    )
+
+    # Load trained model
+    print(f"Loading trained model from {checkpoint_path}")
+    restored = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_path, target=None)
+    if "params" in restored:
+        params = restored["params"]
+    else:
+        params = restored
+    train_state = train_state.replace(params=params)
+    print("Model loaded successfully")
     
-    final_train_state, rewards = train_a2c_jax(config)
+    # Initialize environment
+    reset_fn, step_fn, get_obs_fn = TreadmillEnvironment()
     
-    print("\nTraining Summary:")
-    print(f"Final average reward: {np.mean(rewards[-10:]):.4f}")
-    print(f"Best average reward: {np.max(rewards):.4f}")
+    # Storage for results
+    all_episode_rewards = []
+    all_trajectories = [] if save_trajectories else None
+    
+    # Run evaluation episodes
+    for episode in trange(config.n_sessions, desc='Sessions'):
         
+        # Reset environment for new episode
+        rng_key, reset_key = random.split(train_state.rng_key)
+        _, env_states = jax.vmap(reset_fn, in_axes=(0, None))(jnp.expand_dims(reset_key, 0), env_params)
+        
+        # Reset hidden states
+        train_state = train_state.replace(
+            rng_key=rng_key,
+            actor_hidden=jnp.zeros((1, config.hidden_size)),
+            critic_hidden=jnp.zeros((1, config.hidden_size)),
+            prev_obs=jnp.zeros((1, config.obs_size)),
+            prev_action=jnp.zeros((1,), dtype=jnp.int32),
+            prev_reward=jnp.zeros((1,)),
+        )
+        
+        # Run episode (using a reasonable episode length)
+        
+        trajectory, final_train_state, final_env_states = collect_trajectory(
+            train_state=train_state,
+            env_states=env_states,
+            env_params=env_params,
+            input_noise_std=config.input_noise_std,  # No noise during evaluation
+            var_noise=config.var_noise,
+            rnn_type=config.rnn_type,
+            hidden_size=config.hidden_size,
+            n_steps=session_steps,
+        )
+        
+        # Extract episode metrics
+        episode_reward = float(jnp.sum(trajectory.rewards))
+        
+        all_episode_rewards.append(episode_reward)
+        
+        # Save trajectory if requested
+        if save_trajectories:
+            # Convert JAX arrays to numpy for easier saving
+            traj_no_batch = jax.tree_util.tree_map(lambda x: x[0], trajectory)
+            trajectory_dict = serialization.to_state_dict(traj_no_batch)
+            all_trajectories.append(trajectory_dict)
+        
+        # Update rng for next episode
+        train_state = final_train_state
+    
+    # Compute summary statistics
+    mean_reward_rate = np.mean(all_episode_rewards) / session_steps
+    std_reward_rate = np.std(all_episode_rewards) / session_steps
+    
+    print("\nEvaluation Summary:")
+    print(f"Mean episode reward rate: {mean_reward_rate:.4f} ± {std_reward_rate:.4f}")
+    print(f"Min/Max reward rates: {np.min(all_episode_rewards) / session_steps:.4f} / {np.max(all_episode_rewards) / session_steps:.4f}")
+    
+    # Save results
+    results = {
+        'episode_rewards': all_episode_rewards,
+        'mean_reward_rate': mean_reward_rate,
+        'std_reward_rate': std_reward_rate,
+        'config': config,
+        'timestamp': datetime.now().isoformat(),
+    }
+    
+    # Create results directory
+    results_dir = Path(f"results/{args.exp_title}")
+    results_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save summary results
+    results_file = results_dir / f"evaluation_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"
+    with open(results_file, 'wb') as f:
+        pickle.dump(results, f)
+    print(f"Results saved to {results_file}")
+    
+    # Save trajectories if requested
+    if save_trajectories and all_trajectories:
+        trajectories_file = results_dir / f"trajectories_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pkl"
+        with open(trajectories_file, 'wb') as f:
+            pickle.dump(all_trajectories, f)
+        print(f"Trajectories saved to {trajectories_file}")
+    
+    return results, all_trajectories
+
+
+def main():
+    """Entry point for training or evaluation"""
+    
+    if args.test:
+        # Test/Evaluation mode
+        if args.checkpoint_path is None:
+            print("Error: --checkpoint_path required for test mode")
+            return
+            
+        # You can customize the config here
+        config = TrainingConfig(
+            n_sessions=args.test_sessions,
+            num_envs=1,  # Single env for cleaner episode tracking
+            hidden_size=64,
+            rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
+            reward_param_style=0 if args.curr_style == 'fixed' else 1,
+            reward_func_type=0 if args.reward_func == 'exp' else 1,
+            var_noise=0,
+            input_noise_std=0,
+        )
+        
+        print("Running in TEST mode")
+        print(config)
+        
+        results, trajectories = evaluate_a2c_jax(
+            config=config,
+            checkpoint_path=os.path.join(os.getcwd(), args.checkpoint_path),
+            save_trajectories=args.save_trajectories
+        )
+        
+        print(f"\nTest completed! Mean reward: {results['mean_reward_rate']:.4f}")
+        
+    else:
+        # Training mode (original behavior)
+        config = TrainingConfig(
+            n_sessions=3000,  # Shorter for testing
+            num_envs=128,
+            learning_rate=1e-4,
+            entropy_weight=2.5e-6,
+            hidden_size=64,
+            output_state_save_rate=50,
+            rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
+            reward_param_style=0 if args.curr_style == 'fixed' else 1,
+            reward_func_type=0 if args.reward_func == 'exp' else 1,
+            var_noise=0,
+            input_noise_std=0,
+        )
+
+        print("Running in TRAINING mode")
+        print(config)
+            
+        final_train_state, rewards = train_a2c_jax(config)
+        
+        print("\nTraining Summary:")
+        print(f"Final average reward: {np.mean(rewards[-10:]):.4f}")
+        print(f"Best average reward: {np.max(rewards):.4f}")
+
 
 if __name__ == "__main__":
     main()
+
+    

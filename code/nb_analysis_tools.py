@@ -1,19 +1,15 @@
 import numpy as np
 import glob2 as glob
-import matplotlib as mpl
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 from sklearn.decomposition import PCA
 import pickle
-from sklearn.linear_model import LinearRegression
-from aux_funcs import colored_line, compressed_read, logical_and
-import pandas
-from agents.networks.a2c_rnn_split_augmented import A2CRNNAugmented
-from agents.networks.gru_rnn import GRU_RNN
-import torch
+from aux_funcs import compressed_read
 import os
 from copy import deepcopy as copy
 import pandas as pd
+from typing import Dict, List, Tuple
+from pathlib import Path
+import jax
 
 
 def load_numpy(data_path, averaging_size=1):
@@ -61,45 +57,54 @@ def load_behavioral_data(data_path, update_num=None, all=False):
     return state_data
 
 
-def parse_behavioral_data(d, env_idx):
+def parse_behavioral_data(d, env_idx=None):
 
-    features = [
-        'current_patch_num',
-        'current_patch_start',
-        'current_position',
-        'reward_bounds',
-        'reward_site_idx',
-        'current_reward_site_attempted',
-        'agent_in_patch',
-        'patch_reward_param',
-        'action',
-        'reward',
-        'obs'
-    ]
+    if type(d) is not dict:
+        features = [
+            'current_patch_num',
+            'current_patch_start',
+            'current_position',
+            'reward_bounds',
+            'reward_site_idx',
+            'current_reward_site_attempted',
+            'agent_in_patch',
+            'patch_reward_param',
+            'action',
+            'reward',
+            'obs'
+        ]
 
-    features_to_time_series_dict = {}
-    for f in features:
-        features_to_time_series_dict[f] = []
         
-    for k in np.arange(len(d)):
+        features_to_time_series_dict = {}
         for f in features:
-            features_to_time_series_dict[f].append(d[k][f][env_idx])
+            features_to_time_series_dict[f] = []
             
-    for f in features:
-        try:
-            features_to_time_series_dict[f] = np.array(features_to_time_series_dict[f])
-        except e:
-            print(e)
+        for k in np.arange(len(d)):
+            for f in features:
+                features_to_time_series_dict[f].append(d[k][f][env_idx])
+                
+        for f in features:
+            try:
+                features_to_time_series_dict[f] = np.array(features_to_time_series_dict[f])
+            except e:
+                print(e)
+
+        n_steps = len(d)
+    else:
+        features_to_time_series_dict = d
+        for f in d.keys():
+            d[f] = np.asarray(d[f])
+        n_steps = d['observations'].shape[0]
 
     features_to_time_series_dict['current_patch_num'] = features_to_time_series_dict['current_patch_num'].astype(int)
     
     num_patch_types = len(np.unique(features_to_time_series_dict['current_patch_num']))
 
-    dwell_times = np.zeros((len(d)))
-    rewards_seen_in_patch = np.zeros((len(d)))
-    rewards_seen_in_patch_type = np.zeros((len(d), num_patch_types))
-    total_stops_in_patch_type = np.zeros((len(d), num_patch_types))
-    dwell_time = np.zeros((len(d)))
+    dwell_times = np.zeros((n_steps))
+    rewards_seen_in_patch = np.zeros((n_steps))
+    rewards_seen_in_patch_type = np.zeros((n_steps, num_patch_types))
+    total_stops_in_patch_type = np.zeros((n_steps, num_patch_types))
+    dwell_time = np.zeros((n_steps))
 
     dwell_times_at_positions = []
     rewards_at_positions = [0]
@@ -203,6 +208,7 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
         last_odor_site_data = None
         patch_count = 0
         rw_site_counter = 0
+        global_reward_rate_param = np.sum(np.unique(all_patch_reward_params))
 
         for i, pstart in enumerate(b_data['current_patch_start']):
             if last_pstart is None or (pstart != last_pstart).any():
@@ -229,6 +235,7 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
                     'rewarded_last_odor_site': [0],
                     'added': [0],
                     'rewards_seen_in_patch': [int(rewards_seen_in_patch[i])],
+                    'global_reward_rate_param': [global_reward_rate_param],
                 })
 
                 if last_odor_site_data is not None:
@@ -281,6 +288,22 @@ def get_all_session_summaries(load_path, update_num=None):
     session_summaries = get_session_summaries(all_session_data)
     print('Session summaries generated')
     return session_summaries
+
+
+def get_all_session_summaries_pkl(load_path, lim=None):
+    session_summaries = []
+
+    for i_d, d in enumerate(load_trajectory_data(load_path)):
+        if lim is not None and i_d >= lim:
+            continue
+        session_summaries.append(
+            get_session_summaries([parse_behavioral_data(d)])[0]
+        )
+        print(f'Parsed {i_d}')
+
+    print('Session data loaded')
+    print('Session summaries generated')
+    return session_summaries
         
 
 # Load hidden states and behavior of network from `load path`
@@ -300,6 +323,40 @@ def load_hidden_and_behavior(load_path):
     )
 
     return data, pc_activities, all_session_data, flattened_data, pca
+
+
+def load_trajectory_data(filepath: str) -> Tuple[List[Dict], Dict]:
+    """
+    Load trajectory data saved from test mode evaluation.
+    
+    Args:
+        filepath: Path to the trajectory pickle file
+        
+    Returns:
+        trajectories: List of trajectory dictionaries, one per episode
+        metadata: Dictionary containing evaluation metadata
+    """
+    filepath = Path(filepath)
+    
+    if not filepath.exists():
+        raise FileNotFoundError(f"Trajectory file not found: {filepath}")
+    
+    print(f"Loading trajectory data from: {filepath}")
+    
+    with open(filepath, 'rb') as f:
+        trajectories = pickle.load(f)
+    
+    print(f"Loaded {len(trajectories)} episodes")
+    
+    # Extract metadata from first trajectory
+    if trajectories:
+        sample_traj = trajectories[0]
+        print(f"Episode length: {len(sample_traj['observations'])}")
+        print(f"Observation shape: {sample_traj['observations'].shape}")
+        print(f"Action shape: {sample_traj['actions'].shape}")
+        # print(f"Sample episode reward: {sample_traj['episode_reward']:.4f}")
+    
+    return trajectories
 
 
 def gen_alignment_chart(w, vs, vlim=None, title='', bias=None, ylabel='PC', scale=0.6):
