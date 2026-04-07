@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 from jax import random, lax
-import chex
 from flax import struct
 from typing import Tuple, Dict, Any, Optional
 from functools import partial
@@ -17,6 +16,8 @@ class PatchState:
     reward_sum: float
     odor_num: int
     reward_func_param: float  # decay constant
+    reward_prob_prefactor: float
+    active: bool = True
 
 
 @struct.dataclass
@@ -32,6 +33,7 @@ class TreadmillEnvState:
     total_reward: float
     dwell_time: int
     current_reward_site_attempted: bool
+    exp_filtered_reward_rate: float
     
     # Episode info
     step_count: int
@@ -44,7 +46,7 @@ class TreadmillEnvParams:
     # Transition matrix and reward parameters
     transition_mat: jnp.ndarray  # (3, 3)
     reward_decay_consts: jnp.ndarray  # (3,) - [0, 10, 30]
-    reward_prob_prefactor: float
+    reward_prob_prefactors: jnp.ndarray
     reward_decay_range: jnp.ndarray # (2,) - [0, 30]
     reward_param_style: int # 0 for 'fixed' and 1 for 'independent'
     
@@ -54,16 +56,15 @@ class TreadmillEnvParams:
     interpatch_len_bounds: jnp.ndarray
     interpatch_len_decay_rate: float
 
-    """Environment hyperparameters - matches your constants"""
+    """Environment hyperparameters"""
     num_patch_types: int = 3
     obs_size: int = 4
     action_size: int = 2
     dwell_time_for_reward: int = 6
     reward_site_len: int = 3
-    obs_noise_std: float = 0.05
-    
-    max_steps: int = 20000
+    obs_noise_std: float = 0
     reward_func_type: int = 0
+    patch_active_transition_prob: float = 0.90
 
 
 def treadmill_session_default_params() -> TreadmillEnvParams:
@@ -72,18 +73,21 @@ def treadmill_session_default_params() -> TreadmillEnvParams:
     transition_mat = jnp.ones((3, 3)) / 3.0
     
     # Default reward decay constants [0, 10, 30]
+    # reward_decay_consts = jnp.array([30.0, 10.0, 0.0])
     reward_decay_consts = jnp.array([0.0, 10.0, 30.0])
+    reward_prob_prefactors = jnp.array([0.8, 0.8, 0.8])
+
+    # reward_prob_prefactors = jnp.array([0.0, 0.5, 0.8])
     
     return TreadmillEnvParams(
         num_patch_types=3,
         obs_size=4,
         dwell_time_for_reward=6,
         reward_site_len=3,
-        obs_noise_std=0.05,
-        max_steps=20000,
+        obs_noise_std=0,
         reward_decay_consts=reward_decay_consts,
-        reward_prob_prefactor=0.8,
-        reward_decay_range=jnp.array([0.0, 15.0]),
+        reward_prob_prefactors=reward_prob_prefactors,
+        reward_decay_range=jnp.array([0.0, 40.0]),
         interreward_len_bounds=jnp.array([1.0, 6.0]),
         interreward_len_decay_rate=0.8,
         interpatch_len_bounds=jnp.array([1.0, 12.0]),
@@ -102,32 +106,50 @@ def TreadmillEnvironment():
 
     @jax.jit
     def reset(
-        key: chex.PRNGKey, 
+        key: jnp.ndarray, 
         params: TreadmillEnvParams,
     ) -> Tuple[jnp.ndarray, TreadmillEnvState]:
         """Reset the environment - equivalent to start_new_session()"""
             
         key, subkey1, subkey2, subkey3, subkey4, subkey_reward_param = random.split(key, 6)
 
+        def old_reward_params(key, params):
+            return params.reward_decay_consts
+        
         def new_reward_params_indep(key, params):
-            return random.uniform(
+            key, subkey = random.split(key)
+            reward_params = random.uniform(
                 key,
-                shape=params.reward_decay_consts.shape,
+                shape=3,
                 minval=params.reward_decay_range[0],
                 maxval=params.reward_decay_range[1],
             )
+            return reward_params
+        
+        def new_reward_params_coupled(key, params):
+            key, subkey = random.split(key)
+            global_rate = random.uniform(
+                key,
+                shape=1,
+                minval=params.reward_decay_range[0],
+                maxval=params.reward_decay_range[1],
+            )
+            reward_params = random.gamma(subkey, global_rate * jnp.ones(3))
+            return reward_params
 
-        def old_reward_params(key, params):
-            return params.reward_decay_consts
+        new_reward_params = lax.switch(
+            params.reward_param_style,
+            (
+                old_reward_params,
+                new_reward_params_indep,
+                new_reward_params_coupled,
 
-        new_reward_params = lax.cond(
-            params.reward_param_style == 1,
-            new_reward_params_indep,
-            old_reward_params,
+            ),
             subkey_reward_param,
             params,
         )
 
+        # jax.debug.print('Reward params: {x}', x=new_reward_params )
         
         # Initialize patch number and position
         current_patch_num = random.randint(subkey1, (), 0, params.num_patch_types)
@@ -137,7 +159,7 @@ def TreadmillEnvironment():
         first_patch_start = random.uniform(subkey2, (), minval=1, maxval=3).astype(int)
         
         # Create initial patch
-        patch_state = generate_patch(current_patch_num, first_patch_start, new_reward_params)
+        patch_state = generate_patch(current_patch_num, first_patch_start, new_reward_params, params.reward_prob_prefactors)
         patch_state = generate_new_reward_site(subkey3, patch_state, params, True)
         
         state = TreadmillEnvState(
@@ -150,6 +172,7 @@ def TreadmillEnvironment():
             current_reward_site_attempted=jnp.array(False),
             step_count=jnp.array(0),
             reward_params=new_reward_params,
+            exp_filtered_reward_rate=jnp.array(0.0),
         )
         
         obs = get_observations(subkey4, state, params)
@@ -158,7 +181,7 @@ def TreadmillEnvironment():
     
     @jax.jit
     def step(
-        key: chex.PRNGKey,
+        key: jnp.ndarray,
         state: TreadmillEnvState,
         action: jnp.ndarray,
         params: TreadmillEnvParams,
@@ -195,6 +218,7 @@ def TreadmillEnvironment():
             'current_reward_site_attempted': state.current_reward_site_attempted,
             'patch_reward_param': state.current_patch.reward_func_param,
             'reward': reward,
+            'environment_quality': state.reward_params,
         }
         
         return obs, state, reward, jnp.array(False), info
@@ -221,15 +245,29 @@ def TreadmillEnvironment():
                 reward_attempt = (s.dwell_time >= params.dwell_time_for_reward) & (~s.current_reward_site_attempted)
 
                 def attempt(key, s):
+
+                    key, transition_key = random.split(key)
+
+                    patch_active = jnp.where(
+                        s.current_patch.active,
+                        random.bernoulli(transition_key, params.patch_active_transition_prob).astype(bool),
+                        False,
+                    )
+
                     r = reward_func(
                         key,
                         s.current_patch.reward_sum,
                         s.current_patch.reward_func_param,
+                        s.current_patch.reward_prob_prefactor,
+                        patch_active,
                         params,
                         params.reward_func_type,
                     )
 
-                    patch_state = s.current_patch.replace(reward_sum=s.current_patch.reward_sum + r)
+                    patch_state = s.current_patch.replace(
+                        reward_sum=s.current_patch.reward_sum + r,
+                        active=patch_active,
+                    )
                     
                     return s.replace(
                         current_reward_site_attempted=True,
@@ -280,7 +318,7 @@ def TreadmillEnvironment():
 
                 new_patch_start = s.current_patch.current_reward_site_end + interpatch_len
 
-                patch_state = generate_patch(patch_num, new_patch_start, s.reward_params)
+                patch_state = generate_patch(patch_num, new_patch_start, s.reward_params, params.reward_prob_prefactors)
                 patch_state = generate_new_reward_site(subkey2, patch_state, params, True)
 
                 return s.replace(
@@ -297,7 +335,7 @@ def TreadmillEnvironment():
 
 
     def generate_next_patch_type(
-        key: chex.PRNGKey,
+        key: jnp.ndarray,
         current_patch_num: jnp.ndarray,
         params: TreadmillEnvParams,
     ) -> jnp.ndarray:
@@ -311,11 +349,17 @@ def TreadmillEnvironment():
         return jnp.minimum(next_patch_num, params.num_patch_types - 1)
 
 
-    def generate_patch(patch_num: jnp.ndarray, patch_start: jnp.ndarray, reward_params: jnp.ndarray) -> PatchState:
+    def generate_patch(
+            patch_num: jnp.ndarray,
+            patch_start: jnp.ndarray,
+            reward_params: jnp.ndarray,
+            reward_prob_prefactors: jnp.ndarray,
+        ) -> PatchState:
         """Generate new patch - equivalent to PatchType.generate_patch()"""
         
         # Get reward function parameter
         reward_func_param = reward_params[patch_num]
+        reward_prob_prefactor = reward_prob_prefactors[patch_num]
         
         return PatchState(
             patch_start=patch_start,
@@ -324,12 +368,14 @@ def TreadmillEnvironment():
             current_reward_site_end=0,
             reward_sum=0.0,
             odor_num=patch_num,
-            reward_func_param=reward_func_param
+            reward_func_param=reward_func_param,
+            reward_prob_prefactor=reward_prob_prefactor,
+            active=True,
         )
 
 
     def generate_new_reward_site(
-        key: chex.PRNGKey,
+        key: jnp.ndarray,
         patch_state: PatchState,
         params: TreadmillEnvParams,
         first: bool,
@@ -338,9 +384,9 @@ def TreadmillEnvironment():
         # Generate interreward site length
         interreward_len = sample_truncated_exp(
             key, 
-            params.interreward_len_bounds, 
+            params.interreward_len_bounds,
             params.interreward_len_decay_rate,
-        ).astype(int)
+        ).astype(int) # subtract this from params.interreward_len_bounds[1].astype(int) to reverse distribution
         
         # New reward site starts after current one + interreward distance
         new_reward_site_start = jnp.where(
@@ -358,36 +404,54 @@ def TreadmillEnvironment():
         )
 
 
-    def reward_func(key: chex.PRNGKey, reward_sum: jnp.ndarray, decay_const: jnp.ndarray, params: TreadmillEnvParams, reward_func_type : int) -> jnp.ndarray:
+    def reward_func(
+            key: jnp.ndarray,
+            reward_sum: jnp.ndarray,
+            decay_const: jnp.ndarray,
+            reward_prob_prefactor: jnp.ndarray,
+            patch_active: jnp.ndarray,
+            params: TreadmillEnvParams,
+            reward_func_type : int,
+    ) -> jnp.ndarray:
         """Reward function using lax.cond with integer flags"""
         
         def exp_reward(args):
-            key, reward_sum, decay_const, params = args
+            key, reward_sum, decay_const, reward_prob_prefactor, _, params = args
             reward_prob = jnp.where(
                 decay_const == 0,
                 0,
-                params.reward_prob_prefactor * jnp.exp(-reward_sum / jnp.maximum(decay_const, 1e-8))
+                reward_prob_prefactor * jnp.exp(-reward_sum / jnp.maximum(decay_const, 1e-8))
             )
             return random.bernoulli(key, reward_prob).astype(jnp.float32)
         
         def block_reward(args):
-            key, reward_sum, decay_const, params = args
+            key, reward_sum, decay_const, reward_prob_prefactor, _, params = args
             reward_prob = jnp.where(
                 decay_const == 0,
                 0,
-                jnp.where(reward_sum < decay_const, params.reward_prob_prefactor, 0)
+                jnp.where(reward_sum < decay_const, reward_prob_prefactor, 0)
             )
             return random.bernoulli(key, reward_prob).astype(jnp.float32)
         
-        return lax.cond(
-            reward_func_type == 0,
-            exp_reward,
-            block_reward,
-            (key, reward_sum, decay_const, params)
+        def markov_reward(args):
+            key, _, _, reward_prob_prefactor, patch_active, params = args
+
+            reward_prob = jnp.where(
+                patch_active,
+                reward_prob_prefactor,
+                0.0,
+            )
+            return random.bernoulli(key, reward_prob).astype(jnp.float32)
+
+        
+        return lax.switch(
+            reward_func_type,
+            (exp_reward, block_reward, markov_reward),
+            (key, reward_sum, decay_const, reward_prob_prefactor, patch_active, params)
         )
 
 
-    def get_observations(key: chex.PRNGKey, state: TreadmillEnvState, params: TreadmillEnvParams) -> jnp.ndarray:
+    def get_observations(key: jnp.ndarray, state: TreadmillEnvState, params: TreadmillEnvParams) -> jnp.ndarray:
         """Get observations - equivalent to get_observations()
         
         Returns:
@@ -452,7 +516,7 @@ def TreadmillEnvironment():
     
     
 def sample_truncated_exp(
-    key: chex.PRNGKey, 
+    key: jnp.ndarray, 
     bounds: jnp.ndarray, 
     decay_rate: float
 ) -> jnp.ndarray:

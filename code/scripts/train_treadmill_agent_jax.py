@@ -10,13 +10,14 @@ if __name__ == '__main__':
 # Fix for JAX/Optax version compatibility
 import jax
 import jax.numpy as jnp
+# jax.config.update('jax_enable_x64', True)
+# jax.config.update('jax_debug_nans', True)
 
 # Handle DeviceArray deprecation
 if not hasattr(jnp, 'DeviceArray'):
     jnp.DeviceArray = jax.Array
 
 from jax import random, lax
-import chex
 from flax import struct, serialization
 from flax.training import checkpoints
 from flax import linen as nn
@@ -29,8 +30,10 @@ from tqdm.auto import trange
 import argparse
 import pickle
 from datetime import datetime
-from agents.a2c_rnn_flax import A2CRNNFlax
-
+from aux_funcs import zero_pad
+from agents.a2c_rnn_flax import A2CRNNFlax, init_network_and_params
+from environments.components.train_state import TrainState, create_train_state, init_opt
+from environments.components.treadmill_trajectory import TrajectoryData, collect_trajectory
 # Import your existing JAX environment
 from environments.treadmill_env_jax import (
     TreadmillEnvironment, 
@@ -38,12 +41,21 @@ from environments.treadmill_env_jax import (
     TreadmillEnvState, 
     treadmill_session_default_params
 )
+from pprint import pprint
+
+# Compile-time constants for JAX JIT compatibility
+N_UPDATES_PER_SESSION = 100
+N_STEPS_PER_UPDATE = 200
+
 
 # PARSE ARGUMENTS
 parser = argparse.ArgumentParser()
 parser.add_argument('--exp_title', metavar='et', type=str, default='run')
 parser.add_argument('--noise_var', metavar='nv', type=float, default=1e-4)
 parser.add_argument('--activity_reg', metavar='ar', type=float, default=1)
+parser.add_argument('--gamma', metavar='g', type=float, default=0.997)
+parser.add_argument('--env_prediction_weight', metavar='epw', type=float, default=0) # 0.001
+parser.add_argument('--global_reward_weight', metavar='grw', type=float, default=0) # 0.001
 parser.add_argument('--curr_style', metavar='cs', type=str, default='fixed')
 parser.add_argument('--reward_func', metavar='rf', type=str, default='exp')
 parser.add_argument('--agent_type', metavar='at', type=str, default='split')
@@ -65,219 +77,6 @@ from environments.treadmill_env_jax import (
 )
 
 
-@struct.dataclass
-class TrainState:
-    """Training state containing all mutable components"""
-    params: Any
-    opt_state: Any
-    rng_key: chex.PRNGKey
-    # RNN hidden states for all environments (NUM_ENVS, hidden_size)
-    actor_hidden: jnp.ndarray
-    critic_hidden: jnp.ndarray
-    # Previous step info for network input
-    prev_obs: jnp.ndarray      # (NUM_ENVS, obs_size)
-    prev_action: jnp.ndarray   # (NUM_ENVS,)
-    prev_reward: jnp.ndarray   # (NUM_ENVS,)
-    learning_rate: float
-    grads: jnp.ndarray
-
-
-def create_train_state(
-    rng_key: chex.PRNGKey,
-    obs_size: int,
-    action_size: int, 
-    hidden_size: int,
-    num_envs: int,
-    learning_rate: float,
-    rnn_type: str = 'GRU',
-    var_noise: float = 1e-4,
-) -> TrainState:
-    """Initialize training state"""
-    
-    # Network input size: obs + prev_obs + prev_action + prev_reward
-    input_size = obs_size + action_size + 1
-    
-    # Initialize networktrain_state
-    network = A2CRNNFlax(
-        action_size=action_size,
-        hidden_size=hidden_size, 
-        rnn_type=rnn_type,
-        var_noise=var_noise
-    )
-    
-    # Initialize parameters
-    rng_key, param_key, hidden_key = random.split(rng_key, 3)
-    dummy_input = jnp.zeros((1, input_size))
-    dummy_hidden = jnp.zeros((1, hidden_size))
-    
-    params = network.init(
-        param_key, 
-        dummy_input, 
-        dummy_hidden, 
-        dummy_hidden
-    )
-
-    for k, v in flatten_dict(params['params']).items():
-        print(k, v.shape)
-    
-    # Initialize otptimizer
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(0.15),   # try values 0.3 – 1.0 depending on stability
-        optax.adam(learning_rate),
-    )
-    opt_state = optimizer.init(params)
-    
-    # Initialize hidden states for all environments
-    actor_hidden = jnp.zeros((num_envs, hidden_size))
-    critic_hidden = jnp.zeros((num_envs, hidden_size))
-    
-    # Initialize previous step info
-    prev_obs = jnp.zeros((num_envs, obs_size))
-    prev_action = jnp.zeros((num_envs,), dtype=jnp.int32)
-    prev_reward = jnp.zeros((num_envs,))
-    
-    return TrainState(
-        params=params,
-        opt_state=opt_state,
-        rng_key=rng_key,
-        actor_hidden=actor_hidden,
-        critic_hidden=critic_hidden,
-        prev_obs=prev_obs,
-        prev_action=prev_action,
-        prev_reward=prev_reward,
-        learning_rate=learning_rate,
-        grads=None,
-    )
-
-
-@struct.dataclass
-class TrajectoryData:
-    """Data collected during trajectory rollout"""
-    action: jnp.ndarray
-    current_patch_num: jnp.ndarray
-    current_position: jnp.ndarray
-    current_patch_start: jnp.ndarray
-    agent_in_patch: jnp.ndarray
-    reward_bounds: jnp.ndarray
-    reward_site_idx: jnp.ndarray
-    current_reward_site_attempted: jnp.ndarray
-    patch_reward_param: jnp.ndarray
-    reward: jnp.ndarray
-
-    observations: jnp.ndarray  # (num_envs, n_steps, obs_size)
-    actions: jnp.ndarray       # (num_envs, n_steps)
-    rewards: jnp.ndarray       # (num_envs, n_steps)
-    logits: jnp.ndarray       # (num_envs, n_steps, action_size)
-    values: jnp.ndarray       # (num_envs, n_steps)
-    dones: jnp.ndarray        # (num_envs, n_steps)
-
-
-@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'n_steps'])
-def collect_trajectory(
-    train_state: TrainState,
-    env_states: TreadmillEnvState, 
-    env_params: TreadmillEnvParams,
-    input_noise_std: float,
-    var_noise: float,
-    rnn_type: str,
-    hidden_size: int,
-    n_steps: int,
-) -> Tuple[TrajectoryData, TrainState, TreadmillEnvState]:
-    """Collect trajectory using lax.scan over time steps"""
-    
-    network = A2CRNNFlax(
-        action_size=2,  # Fixed ACTION_SIZE
-        hidden_size=hidden_size,  # This should come from config
-        var_noise=var_noise,   # This should come from config,
-        rnn_type=rnn_type,
-    )
-    
-    reset_fn, step_fn, get_obs_fn = TreadmillEnvironment()
-    
-    def scan_step(carry, _):
-        train_state, env_states = carry
-        rng_key = train_state.rng_key
-        
-        # Sample actions using current observations (from previous step)
-        # Create network input: [current_obs, prev_obs, prev_action, prev_reward]
-        prev_action_one_hot = jax.nn.one_hot(train_state.prev_action, num_classes=2)  # Assuming 2 actions
-        network_input = jnp.concatenate([
-            train_state.prev_obs,                    # Current observations  
-            prev_action_one_hot,  # Previous action as scalar
-            train_state.prev_reward[..., None],      # Previous reward
-        ], axis=-1)
-        
-        # Add input noise
-        rng_key, noise_key = random.split(rng_key)
-        obs_noise = random.normal(noise_key, network_input.shape) * input_noise_std
-        network_input = network_input + obs_noise
-        
-        # Forward pass through network
-        logits, values, new_actor_hidden, new_critic_hidden = network.apply(
-            train_state.params,
-            network_input,
-            train_state.actor_hidden,
-            train_state.critic_hidden,
-            rngs={'noise': rng_key} if train_state.params  else {}  # Simple check
-        )
-        
-        # Sample actions
-        rng_key, action_key = random.split(rng_key)
-        action_keys = random.split(action_key, logits.shape[0])
-        actions = jax.vmap(
-            lambda key, logit: random.categorical(key, logit)
-        )(action_keys, logits)
-        
-        # Step environments with sampled actions
-        rng_key, step_key = random.split(rng_key)
-        step_keys = random.split(step_key, actions.shape[0])
-        step_results = jax.vmap(
-            lambda key, state, action: step_fn(key, state, action, env_params)
-        )(step_keys, env_states, actions)
-        
-        # Unpack step results
-        new_obs, new_env_states, rewards, dones, infos = step_results
-        
-        # Update train state with new info
-        new_train_state = train_state.replace(
-            rng_key=rng_key,
-            actor_hidden=new_actor_hidden,
-            critic_hidden=new_critic_hidden,
-            prev_obs=new_obs,        # Store current obs as previous for next step
-            prev_action=actions,     # Store current action as previous
-            prev_reward=rewards,     # Store current reward as previous
-        )
-        
-        # Return step data (using the observations that were actually used for decisions)
-        step_data = {
-            'observations': train_state.prev_obs,  # The obs that led to these actions
-            'actions': actions,
-            'rewards': rewards, 
-            'logits': logits,
-            'values': values,
-            'dones': dones,
-        } | infos
-        
-        return (new_train_state, new_env_states), step_data
-    
-    # Run scan over time steps using compile-time constant
-    (final_train_state, final_env_states), trajectory_data = lax.scan(
-        scan_step,
-        (train_state, env_states),
-        None,
-        length=n_steps  # Now a compile-time constant
-    )
-    
-    # Reshape trajectory data from (n_steps, num_envs, ...) to (num_envs, n_steps, ...)
-    trajectory_data = jax.tree.map(
-        lambda x: jnp.swapaxes(x, 0, 1), trajectory_data
-    )
-    
-    trajectory = TrajectoryData(**trajectory_data)
-    
-    return trajectory, final_train_state, final_env_states, 
-
-
 def compute_a2c_loss(
     params: Any,
     train_state: TrainState,
@@ -286,10 +85,13 @@ def compute_a2c_loss(
     gamma: float,
     critic_weight: float,
     entropy_weight: float,
+    env_prediction_weight: float,
+    global_reward_weight: float,
     input_noise_std: float,
     var_noise: float,
     rnn_type: str,
     hidden_size: int,
+    obs_size: int,
 ) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
     """Compute A2C loss by calling collect_trajectory with the params argument"""
     
@@ -298,24 +100,30 @@ def compute_a2c_loss(
     
     # Call collect_trajectory - now it will use the params argument
     trajectory, final_train_state, final_env_states = collect_trajectory(
-        modified_train_state,
-        env_states,
-        env_params,
-        input_noise_std,
-        var_noise,
-        rnn_type,
-        hidden_size,
-        N_STEPS_PER_UPDATE,
+        train_state=modified_train_state,
+        env_states=env_states,
+        env_params=env_params,
+        input_noise_std=input_noise_std,
+        var_noise=var_noise,
+        rnn_type=rnn_type,
+        hidden_size=hidden_size,
+        obs_size=obs_size,
+        n_steps=N_STEPS_PER_UPDATE,
     )
     
     # Now compute loss using the collected trajectory
-    returns = jax.vmap(compute_n_step_returns, (0, None,))(trajectory.rewards, gamma)
-    advantages = returns - trajectory.values
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-    
-    # Actor loss (policy gradient)
-    probs = jax.nn.softmax(trajectory.logits)
-    log_probs = jnp.log(probs + 1e-8)
+    returns = jax.vmap(compute_n_step_returns, (0, None, 0))(trajectory.rewards, gamma, trajectory.values[:, -1])
+    advantages = jnp.concatenate(
+        (returns[:, 1:] - trajectory.values[:, :-1], jnp.zeros((returns.shape[0], 1))),
+        axis=1
+    )
+
+    # advantages = compute_gaes(trajectory.rewards, trajectory.values, gamma, 0.97)
+    advantages = (advantages - advantages.mean()) # / (advantages.std() + 1e-6)
+
+
+    # Actor loss (policy gradient
+    log_probs = jax.nn.log_softmax(trajectory.logits)
     chosen_log_probs = jnp.take_along_axis(
         log_probs,
         jax.lax.stop_gradient(trajectory.actions[..., None]),
@@ -326,28 +134,72 @@ def compute_a2c_loss(
     
     # Critic loss
     critic_loss = jnp.mean(advantages ** 2)
+
+    # predict environment parameters
+    env_quality_prediction_loss = jnp.mean(
+        (trajectory.pred_environment_quality - jax.lax.stop_gradient(trajectory.environment_quality)) ** 2 # added stop gradient call
+    )
+
+    global_reward_rate_loss = jnp.mean(
+        (trajectory.pred_reward_rate.squeeze() - jax.lax.stop_gradient(trajectory.exp_filtered_reward_rate) ) ** 2
+    )
     
+    obs_plus_rewards = jnp.concatenate((trajectory.observations, trajectory.rewards[..., None]), axis=2)
+    pred_obs_loss = jnp.mean(
+        (trajectory.pred_obs[:, :-1, :] -  jax.lax.stop_gradient(obs_plus_rewards[:, 1:, :])) ** 2 # added stop gradient on obs_plus_rewards
+    )
+
     # Entropy loss
-    entropy = -jnp.sum(probs * jnp.log(probs + 1e-8), axis=-1)
+    probs = jax.nn.softmax(trajectory.logits)
+    entropy = -jnp.sum(probs * log_probs, axis=-1)
     entropy_loss = -jnp.mean(entropy)
+
+    activity_norm = (
+        jnp.linalg.norm(trajectory.actor_hidden, axis=2).mean()
+        + jnp.linalg.norm(trajectory.critic_hidden, axis=2).mean()
+    )
+    
+    # for applying an L2 weight norm
+    # param_leaves = jax.tree_util.tree_leaves(final_train_state.params)
+    # l2_weight_norm = jnp.sum(jnp.array(
+    #     jax.tree_util.tree_map(
+    #         lambda p: jnp.sum(jnp.square(p)),
+    #         param_leaves,
+    #     )
+    # ))
+
+    # jax.debug.print('Env quality pred err: {x}', x=env_quality_prediction_loss)
     
     # Total loss
-    total_loss = actor_loss + critic_weight * critic_loss + entropy_weight * entropy_loss
+    total_loss = (
+        actor_loss
+        + critic_weight * critic_loss
+        + entropy_weight * entropy_loss
+        # + 1e-2 * activity_norm
+        + 1e-4 * activity_norm
+        + env_prediction_weight * env_quality_prediction_loss
+        + 0 * pred_obs_loss
+        + global_reward_weight * global_reward_rate_loss
+    )
+
+    # jax.debug.print('total: {x}', x=total_loss)
+    # jax.debug.print('pred_obs: {x}', x=10 * global_reward_rate_loss)
     
     metrics = {
         'total_loss': total_loss,
         'actor_loss': actor_loss,
         'critic_loss': critic_loss,
         'entropy_loss': entropy_loss,
+        'activity_loss': activity_norm,
         'mean_reward': jnp.mean(trajectory.rewards),
-        'final_train_state': final_train_state,
-        'final_env_states': final_env_states,
+        'final_train_state': jax.tree_util.tree_map(lax.stop_gradient, final_train_state),
+        'final_env_states': jax.tree_util.tree_map(lax.stop_gradient, final_env_states),
     }
     
     return total_loss, metrics
 
 
-def compute_n_step_returns(rewards, gamma):
+def compute_n_step_returns(rewards, gamma, v_t):
     """
     Compute n-step returns for n=0 to max_n efficiently
     
@@ -361,19 +213,53 @@ def compute_n_step_returns(rewards, gamma):
 
     def compute_return(carry, reward):
         (i, rolling_sum) = carry
-        rolling_sum += jnp.power(gamma, i) * reward
+        rolling_sum = reward + gamma * rolling_sum
         return (i+1, rolling_sum), rolling_sum
     
     _, returns = lax.scan(
         compute_return,
-        (0, 0),
+        (0, v_t),
         rewards,
         reverse=True,
     )
     return returns
 
 
-@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size'])
+def compute_gaes(rewards, values, gamma, lam):
+    """
+    rewards: [B, T]
+    values:  [B, T+1]
+    --> returns advantages: [B, T]
+    """
+
+    # Move time to axis 0, because scan iterates over axis 0
+    rewards_t = rewards.T            # [T, B]
+    values_t  = values.T             # [T+1, B]
+
+    def gae_scan(carry, x_t):
+        reward_t, value_t, value_tp1 = x_t
+        delta = reward_t + gamma * value_tp1 - value_t
+        gae = delta + gamma * lam * carry
+        return gae, gae
+
+    # xs is a tuple of time-major sequences
+    xs = (rewards_t[:-1], values_t[:-1], values_t[1:])   # shapes all [T, B]
+
+    # reverse=True makes scan go from T-1 → 0
+    _, adv_t = jax.lax.scan(
+        gae_scan,
+        init=jnp.zeros(rewards.shape[0]),  # [B]
+        xs=xs,
+        reverse=True
+    )
+
+    return jnp.concatenate((
+        adv_t.T,
+        jnp.zeros((rewards.shape[0], 1))
+    ), axis=1)
+
+
+@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'obs_size'])
 def train_step(
     train_state: TrainState,
     env_states: TreadmillEnvState,
@@ -381,11 +267,14 @@ def train_step(
     gamma: float,
     critic_weight: float,
     entropy_weight: float,
+    env_prediction_weight: float,
+    global_reward_weight: float,
     input_noise_std: float,
     action_size: int,
     hidden_size: int,
     var_noise: float,
     rnn_type: str,
+    obs_size: int,
 ) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
     """Single training step"""
     
@@ -399,24 +288,31 @@ def train_step(
         gamma,
         critic_weight,
         entropy_weight,
+        env_prediction_weight,
+        global_reward_weight,
         input_noise_std,
         var_noise,
         rnn_type,
         hidden_size,
+        obs_size,
     )
 
     metrics['grad_norm'] = optax.global_norm(grads)
     
     # Apply updates
     optimizer = optax.chain(
-        optax.clip_by_global_norm(0.15),   # try values 0.3 – 1.0 depending on stability
-        optax.adam(train_state.learning_rate),
+        optax.clip_by_global_norm(0.5),   # try values 0.3 – 1.0 depending on stability
+        optax.apply_if_finite(
+            # optax.adam(train_state.learning_rate),
+            optax.rmsprop(train_state.learning_rate, eps_in_sqrt=False, decay=0.99),
+            max_consecutive_errors=100,
+        ),
     )
     updates, new_opt_state = optimizer.update(
         grads, train_state.opt_state, train_state.params
     )
     new_params = optax.apply_updates(train_state.params, updates)
-    
+    train_state.params
     # Get updated states from metrics
     final_train_state = metrics['final_train_state']
     final_env_states = metrics['final_env_states']
@@ -426,28 +322,21 @@ def train_step(
         params=new_params,
         opt_state=new_opt_state,
     )
-
-    final_train_state = jax.tree_util.tree_map(lax.stop_gradient, final_train_state)
-    final_env_states = jax.tree_util.tree_map(lax.stop_gradient, final_env_states)
     
     return final_train_state, final_env_states, metrics
-
-
-# Compile-time constants for JAX JIT compatibility
-N_UPDATES_PER_SESSION = 100
-N_STEPS_PER_UPDATE = 200
 
 # Configuration matching your original hyperparameters
 @struct.dataclass
 class TrainingConfig:
-    # Environment params
+    # Environment 
+    exp_name: str = ''
     num_envs: int = 64
     patch_types_per_env: int = 3
     obs_size: int = 4  # patch_types_per_env + 1
     action_size: int = 2
     dwell_time_for_reward: int = 6
     reward_site_len: int = 3
-    input_noise_std: float = 0.05
+    input_noise_std: float = 0
     reward_param_style: int = 0
     reward_func_type: int = 0
     
@@ -455,6 +344,8 @@ class TrainingConfig:
     hidden_size: int = 128
     critic_weight: float = 0.0785
     entropy_weight: float = 1.02e-6 # 1.02e-06
+    env_prediction_weight: float = 0.001
+    global_reward_weight: float = 0
     gamma: float = 0.997 # 0.987
     learning_rate: float = 2.5e-5
     var_noise: float = 1e-4
@@ -467,7 +358,7 @@ class TrainingConfig:
     output_state_save_rate: int = 100
 
 
-@partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'var_noise', 'rnn_type'])
+@partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'var_noise', 'rnn_type', 'obs_size'])
 def run_session_updates_with_metrics(
     train_state: TrainState,
     env_states: TreadmillEnvState,
@@ -475,11 +366,14 @@ def run_session_updates_with_metrics(
     gamma: float,
     critic_weight: float,
     entropy_weight: float,
+    env_prediction_weight: float,
+    global_reward_weight: float,
     input_noise_std: float,
     action_size: int,
     hidden_size: int,
     var_noise: float,
     rnn_type: str,
+    obs_size: int,
 ) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
     """Run all training updates with full metrics collection"""
     
@@ -493,11 +387,14 @@ def run_session_updates_with_metrics(
             gamma=gamma,
             critic_weight=critic_weight,
             entropy_weight=entropy_weight,
+            env_prediction_weight=env_prediction_weight,
+            global_reward_weight=global_reward_weight,
             input_noise_std=input_noise_std,
             action_size=action_size,
             hidden_size=hidden_size,
             var_noise=var_noise,
             rnn_type=rnn_type,
+            obs_size=obs_size,
         )
         
         return (new_train_state, new_env_states), metrics
@@ -509,6 +406,9 @@ def run_session_updates_with_metrics(
         None,
         length=N_UPDATES_PER_SESSION,
     )
+
+    jax.debug.print('grad_norm: {x}', x=all_metrics['grad_norm'])
+    jax.debug.print('activity_norm: {x}', x=all_metrics['activity_loss'])
     
     return final_train_state, final_env_states, all_metrics
 
@@ -532,17 +432,26 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
         reward_param_style=config.reward_param_style,
         reward_func_type=config.reward_func_type,
     )
+
+    net_init_key, rng_key = random.split(rng_key)
+
+    network, params = init_network_and_params(
+        hidden_size=config.hidden_size,
+        action_size=config.action_size,
+        obs_size=config.obs_size,
+        rnn_type=config.rnn_type,
+        var_noise=config.var_noise,
+        rng_key=net_init_key,
+    )
     
     # Create training state
     train_state = create_train_state(
         rng_key=rng_key,
         obs_size=config.obs_size,
-        action_size=config.action_size,
         hidden_size=config.hidden_size,
         num_envs=config.num_envs,
         learning_rate=config.learning_rate,
-        rnn_type=config.rnn_type,
-        var_noise=config.var_noise,
+        params=params,
     )
 
     # Load pretrained model if path is given
@@ -563,17 +472,42 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
     rng_key, reset_key = random.split(train_state.rng_key)
     reset_keys = random.split(reset_key, config.num_envs)
     
-    _, env_states = jax.vmap(reset_fn, in_axes=(0, None))(reset_keys, env_params)
+    obs, env_states = jax.vmap(reset_fn, in_axes=(0, None))(reset_keys, env_params)
+    train_state = train_state.replace(prev_obs=obs)
     print(f"Initialized {config.num_envs} environments")
     
     # Storage for logging (matching your original structure)
     all_session_rewards = []
+
+    save_dir_rewards = Path(f'exp_reward_rates/{config.exp_name}').resolve()  # makes it absolute
+    save_dir_rewards.mkdir(parents=True, exist_ok=True)
+
+    save_dir = Path(f"checkpoints/{config.exp_name}").resolve()  # makes it absolute
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    save_dir_rewards = save_dir / '_reward_rates'
+    save_dir_rewards.mkdir(parents=True, exist_ok=True)
     
     # Training loop (outer loop stays in Python for logging)
     for session_num in trange(config.n_sessions, desc='Sessions'):
         
         avg_rewards_per_update = np.empty((config.num_envs, N_UPDATES_PER_SESSION))
         all_info = []
+
+        # Reset environment for new episode
+        rng_key, reset_key = random.split(train_state.rng_key)
+        reset_keys = random.split(reset_key, config.num_envs)
+        obs, env_states = jax.vmap(reset_fn, in_axes=(0, None))(reset_keys, env_params)
+
+        # Reset hidden states
+        train_state = train_state.replace(
+            rng_key=rng_key,
+            actor_hidden=jnp.zeros((config.num_envs, config.hidden_size)),
+            critic_hidden=jnp.zeros((config.num_envs, config.hidden_size)),
+            prev_action=jnp.zeros((config.num_envs,), dtype=jnp.int32),
+            prev_reward=jnp.zeros((config.num_envs,)),
+            prev_obs=obs,
+        )
         
         train_state, env_states, all_metrics = run_session_updates_with_metrics(
             train_state=train_state,
@@ -582,16 +516,28 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
             gamma=config.gamma,
             critic_weight=config.critic_weight,
             entropy_weight=config.entropy_weight,
+            env_prediction_weight=config.env_prediction_weight,
+            global_reward_weight=config.global_reward_weight,
             input_noise_std=config.input_noise_std,
             action_size=config.action_size,
             hidden_size=config.hidden_size,
             var_noise=config.var_noise,
             rnn_type=config.rnn_type,
+            obs_size=config.obs_size,
         )
+
+        # pprint(train_state.params)
 
         avg_rewards_per_update = all_metrics['mean_reward']
         grad_norms = all_metrics['grad_norm']
+        print('grad_norms')
         print('mean:', jnp.mean(grad_norms), 'std:', jnp.std(grad_norms))
+        # print(grad_norms)
+        # weight_norms = all_metrics['weight_norm']
+        # print('weight mean:', jnp.mean(weight_norms), 'std:', jnp.std(weight_norms))
+        # losses = all_metrics['total_loss']
+        # print('loss mean:', jnp.mean(losses), 'std:', jnp.std(losses))
+        # print()
 
             
         # Session-level logging
@@ -602,8 +548,8 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
         
         # Periodic saving (matching your original save rate)
         if session_num % config.output_state_save_rate == 0:
-            print(f"Would save checkpoint at session {session_num}")
-            save_dir = Path(f"checkpoints/{args.exp_title}").resolve()  # makes it absolute
+            print(f"Save checkpoint at session {session_num}")
+            save_dir = Path(f"checkpoints/{config.exp_name}").resolve()  # makes it absolute
             checkpoints.save_checkpoint(
                 ckpt_dir=str(save_dir),
                 target={"params": train_state.params},  # or just train_state
@@ -611,6 +557,10 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
                 overwrite=True, # allows overwriting instead of accumulating
                 keep=100,
             )
+
+        sn = zero_pad(session_num, 6)
+        with open(save_dir_rewards / f'{sn}', 'ab') as f:
+            np.save(f, avg_rewards_per_update)
     
     print("Training completed!")
     return train_state, all_session_rewards
@@ -633,17 +583,26 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
     )
 
     session_steps = N_UPDATES_PER_SESSION * N_STEPS_PER_UPDATE
+
+    net_init_key, rng_key = random.split(rng_key)
+
+    network, params = init_network_and_params(
+        hidden_size=config.hidden_size,
+        action_size=config.action_size,
+        obs_size=config.obs_size,
+        rnn_type=config.rnn_type,
+        var_noise=config.var_noise,
+        rng_key=net_init_key,
+    )
     
     # Create training state (just for structure, won't be updated)
     train_state = create_train_state(
         rng_key=rng_key,
         obs_size=config.obs_size,
-        action_size=config.action_size,
         hidden_size=config.hidden_size,
         num_envs=1,  # Use single environment for cleaner episode tracking
-        learning_rate=config.learning_rate,  # Won't be used
-        rnn_type=config.rnn_type,
-        var_noise=config.var_noise,
+        learning_rate=config.learning_rate,
+        params=params,
     )
 
     # Load trained model
@@ -665,23 +624,23 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
     
     # Run evaluation episodes
     for episode in trange(config.n_sessions, desc='Sessions'):
-        
+
         # Reset environment for new episode
         rng_key, reset_key = random.split(train_state.rng_key)
-        _, env_states = jax.vmap(reset_fn, in_axes=(0, None))(jnp.expand_dims(reset_key, 0), env_params)
-        
+        reset_keys = random.split(reset_key, config.num_envs)
+        obs, env_states = jax.vmap(reset_fn, in_axes=(0, None))(reset_keys, env_params)
+
         # Reset hidden states
         train_state = train_state.replace(
             rng_key=rng_key,
             actor_hidden=jnp.zeros((1, config.hidden_size)),
             critic_hidden=jnp.zeros((1, config.hidden_size)),
-            prev_obs=jnp.zeros((1, config.obs_size)),
             prev_action=jnp.zeros((1,), dtype=jnp.int32),
             prev_reward=jnp.zeros((1,)),
+            prev_obs=obs,
         )
-        
+
         # Run episode (using a reasonable episode length)
-        
         trajectory, final_train_state, final_env_states = collect_trajectory(
             train_state=train_state,
             env_states=env_states,
@@ -690,6 +649,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
             var_noise=config.var_noise,
             rnn_type=config.rnn_type,
             hidden_size=config.hidden_size,
+            obs_size=config.obs_size,
             n_steps=session_steps,
         )
         
@@ -726,7 +686,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
     }
     
     # Create results directory
-    results_dir = Path(f"results/{args.exp_title}")
+    results_dir = Path(f"results/{config.exp_name}")
     results_dir.mkdir(parents=True, exist_ok=True)
     
     # Save summary results
@@ -745,8 +705,32 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
     return results, all_trajectories
 
 
+def reward_param_style_str_to_int(style):
+    if style == 'fixed':
+        return 0
+    elif style == 'indep':
+        return 1
+    elif style == 'coupled':
+        return 2
+    else:
+        raise NotImplementedError('reward param style not found')
+    
+
+def reward_func_type_str_to_int(func_type):
+    if func_type == 'exp':
+        return 0
+    elif func_type == 'block':
+        return 1
+    elif func_type == 'markov':
+        return 2
+    else:
+        raise NotImplementedError('reward func type not found')
+
+
 def main():
     """Entry point for training or evaluation"""
+    time_stamp = str(datetime.now()).replace(' ', '_')
+    exp_name = f'{args.exp_title}_seed_{args.seed}_{time_stamp}'
     
     if args.test:
         # Test/Evaluation mode
@@ -756,14 +740,16 @@ def main():
             
         # You can customize the config here
         config = TrainingConfig(
+            exp_name=exp_name,
             n_sessions=args.test_sessions,
             num_envs=1,  # Single env for cleaner episode tracking
             hidden_size=64,
+            obs_size=4,
             rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
-            reward_param_style=0 if args.curr_style == 'fixed' else 1,
-            reward_func_type=0 if args.reward_func == 'exp' else 1,
+            reward_param_style=reward_param_style_str_to_int(args.curr_style),
+            reward_func_type=reward_func_type_str_to_int(args.reward_func),
             var_noise=0,
-            input_noise_std=0,
+            input_noise_std=0 #0.02,
         )
         
         print("Running in TEST mode")
@@ -778,19 +764,26 @@ def main():
         print(f"\nTest completed! Mean reward: {results['mean_reward_rate']:.4f}")
         
     else:
+
         # Training mode (original behavior)
         config = TrainingConfig(
-            n_sessions=3000,  # Shorter for testing
+            exp_name=exp_name,
+            n_sessions=5000,
             num_envs=128,
-            learning_rate=1e-4,
-            entropy_weight=2.5e-6,
-            hidden_size=64,
+            learning_rate=1e-4, #1e-4 for GRU, 2e-5, smaller for relu
+            entropy_weight=2.5e-3,# for relu 2.5e-5, GRU benefits from larger entropy bonus, like 2.5e-3
+            critic_weight=0.05, # 0.5 originally for GRU, 0.04 for relu,
+            env_prediction_weight=args.env_prediction_weight, # 0.001,
+            global_reward_weight=args.global_reward_weight,
+            gamma=args.gamma,
+            hidden_size=64, #64
+            obs_size=4,
             output_state_save_rate=50,
             rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
-            reward_param_style=0 if args.curr_style == 'fixed' else 1,
-            reward_func_type=0 if args.reward_func == 'exp' else 1,
+            reward_param_style=reward_param_style_str_to_int(args.curr_style),
+            reward_func_type=reward_func_type_str_to_int(args.reward_func),
             var_noise=0,
-            input_noise_std=0,
+            input_noise_std=0.02,
         )
 
         print("Running in TRAINING mode")

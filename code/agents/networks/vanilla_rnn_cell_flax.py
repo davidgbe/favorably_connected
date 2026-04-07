@@ -1,6 +1,7 @@
 from flax import linen as nn
 from jax import random
 import jax.numpy as jnp
+import jax
 
 class VanillaRNNCell(nn.Module):
     """Vanilla RNN cell with custom initializers"""
@@ -18,8 +19,7 @@ class VanillaRNNCell(nn.Module):
         self.hidden_projection = nn.Dense(
             self.hidden_size, 
             use_bias=True,
-            kernel_init=nn.initializers.orthogonal(),  # Orthogonal weights
-            bias_init=nn.initializers.zeros,           # Zero bias
+            kernel_init=nn.initializers.orthogonal(scale=1.0),
         )
         
     def __call__(self, hidden, x):

@@ -71,7 +71,8 @@ def parse_behavioral_data(d, env_idx=None):
             'patch_reward_param',
             'action',
             'reward',
-            'obs'
+            'obs',
+            'pred_environment_quality',
         ]
 
         
@@ -182,6 +183,7 @@ def parse_all_sessions(data_path, num_envs):
 
 def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward=40):
     all_session_summaries = []
+    session_number = 0
 
     for b_data in all_behavior_data:
         rewards_at_positions = b_data['rewards_at_positions']
@@ -205,7 +207,7 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
         last_pstart = None
         last_reward_site_start = None
         last_reward_site_end = None
-        last_odor_site_data = None
+        hist_odor_site_data = []
         patch_count = 0
         rw_site_counter = 0
         global_reward_rate_param = np.sum(np.unique(all_patch_reward_params))
@@ -217,10 +219,10 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
                 ss['reward_param_for_patch_type'][pt] = all_patch_reward_params[i]
                 patch_count += 1
                 rw_site_counter = 0
-                if last_odor_site_data is not None and last_odor_site_data['added'][0] == 0:
-                    ss['all_odor_site_data'].append(last_odor_site_data)
-                    last_odor_site_data['added'] = [1]
-                    last_odor_site_data = None
+                if len(hist_odor_site_data) > 0 and hist_odor_site_data[-1]['added'][0] == 0:
+                    hist_odor_site_data[-1]['added'] = [1]
+                    ss['all_odor_site_data'].append(hist_odor_site_data[-1])
+                    hist_odor_site_data = []
 
             rwsb = copy(b_data['reward_bounds'][i])
             reward_site_start = int(rwsb[0])
@@ -231,16 +233,14 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
                     'patch_reward_param': [all_patch_reward_params[i]],
                     'index': [rw_site_counter],
                     'stopped': [0],
-                    'rewarded': [1],
+                    'rewarded': [0],
                     'rewarded_last_odor_site': [0],
                     'added': [0],
                     'rewards_seen_in_patch': [int(rewards_seen_in_patch[i])],
                     'global_reward_rate_param': [global_reward_rate_param],
+                    'patch_number': [patch_count],
+                    'session_number': [session_number],
                 })
-
-                if last_odor_site_data is not None:
-                    odor_site_data['dist_last_odor_site'] = reward_site_start - last_reward_site_end
-                    odor_site_data['rewarded_last_odor_site'] = last_odor_site_data['rewarded']
 
                 if rewards_seen_in_patch[i] < max_acc_reward:
                     ss['acc_reward_stop_opportunities_for_patch_type'][pt, int(rewards_seen_in_patch[i])] += 1
@@ -265,16 +265,26 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
 
                     rw_site_counter += 1
 
-                if last_odor_site_data is not None:
-                    ss['all_odor_site_data'].append(last_odor_site_data)
-                    last_odor_site_data['added'] = [1]
-                last_odor_site_data = odor_site_data
+                if len(hist_odor_site_data) > 0:
+                    odor_site_data['dist_last_odor_site'] = reward_site_start - last_reward_site_end
+                    for i, prev_odor_site_data in enumerate(reversed(hist_odor_site_data)):
+                        odor_site_data[f'rewarded_{i+1}'] = prev_odor_site_data['rewarded']
+
+                    odor_site_data['consecutive_misses'] = np.where(odor_site_data['rewarded_1'] == 1, 0, hist_odor_site_data[-1]['consecutive_misses'] + 1)
+                    
+                    ss['all_odor_site_data'].append(hist_odor_site_data[-1])
+                    hist_odor_site_data[-1]['added'] = [1]
+                else:
+                    odor_site_data['consecutive_misses'] = 0
+
+                hist_odor_site_data.append(odor_site_data)
 
             last_pstart = pstart
             last_reward_site_start = reward_site_start
             last_reward_site_end = rwsb[1]
 
         all_session_summaries.append(ss)
+        session_number += 1
 
     return all_session_summaries
 
@@ -299,7 +309,6 @@ def get_all_session_summaries_pkl(load_path, lim=None):
         session_summaries.append(
             get_session_summaries([parse_behavioral_data(d)])[0]
         )
-        print(f'Parsed {i_d}')
 
     print('Session data loaded')
     print('Session summaries generated')
@@ -469,3 +478,8 @@ def find_odor_site_trajectories_by_patch_type(session_data, first_site_only=Fals
         patch_num = int(session_data['current_patch_num'][patch_traj_indices][0])
         trajs_by_patch_type[patch_num].append(patch_traj_indices)
     return trajs_by_patch_type
+
+
+def savefig(fig, figpath):
+    fig.savefig(figpath + '.png')
+    fig.savefig(figpath + '.svg')

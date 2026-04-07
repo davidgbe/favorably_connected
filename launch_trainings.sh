@@ -1,21 +1,12 @@
 #!/bin/bash
 
-python code/scripts/train_treadmill_agent_jax.py --exp_title vanilla_fixed_ortho_init_exp_fixed_seed_5000 --rnn_type VANILLA --seed 5000 --reward_func exp --curr_style fixed
-python code/scripts/train_treadmill_agent_jax.py --exp_title vanilla_fixed_ortho_init_exp_fixed_seed_5001 --rnn_type VANILLA --seed 5001 --reward_func exp --curr_style fixed
-python code/scripts/train_treadmill_agent_jax.py --exp_title vanilla_fixed_ortho_init_block_fixed_seed_5002 --rnn_type VANILLA --seed 5002 --reward_func block --curr_style fixed
-python code/scripts/train_treadmill_agent_jax.py --exp_title vanilla_fixed_ortho_init_block_fixed_seed_5003 --rnn_type VANILLA --seed 5003 --reward_func block --curr_style fixed
+# python code/scripts/train_treadmill_agent_jax.py --exp_title gru_exp_indep_pred_all_tau_0_gamma_0.999_seed_8002 --rnn_type GRU --seed 8002 --reward_func exp --curr_style indep --gamma 0.999
 
-python code/scripts/train_treadmill_agent_jax.py --exp_title vanilla_fixed_ortho_init_exp_fixed_seed_5004 --rnn_type VANILLA --seed 5004 --reward_func exp --curr_style indep
-python code/scripts/train_treadmill_agent_jax.py --exp_title vanilla_fixed_ortho_init_exp_fixed_seed_5005 --rnn_type VANILLA --seed 5005 --reward_func exp --curr_style indep
-python code/scripts/train_treadmill_agent_jax.py --exp_title vanilla_fixed_ortho_init_block_fixed_seed_5006 --rnn_type VANILLA --seed 5006 --reward_func block --curr_style indep
-python code/scripts/train_treadmill_agent_jax.py --exp_title vanilla_fixed_ortho_init_block_fixed_seed_5007 --rnn_type VANILLA --seed 5007 --reward_func block --curr_style indep
+export CUDA_VISIBLE_DEVICES=0  # Uses the second GPU (index 1)
+# python code/scripts/train_treadmill_agent_jax.py --exp_title gru_exp_indep_pred_global_adam_reward_gamma_0.999_seed_8002 --rnn_type GRU --seed 8002 --reward_func exp --curr_style indep --gamma 0.999
+# python code/scripts/train_treadmill_agent_jax_multihead_value.py --exp_title gru_exp_indep_actor_non_geo_500_gammas_gamma_0.999_seed_8002 --rnn_type GRU --seed 8002 --reward_func exp --curr_style indep --gamma 0.999
 
-python code/scripts/train_treadmill_agent_jax.py --exp_title gru_exp_fixed_seed_5000 --rnn_type GRU --seed 5000 --reward_func exp --curr_style fixed
-python code/scripts/train_treadmill_agent_jax.py --exp_title gru_exp_fixed_seed_5001 --rnn_type GRU --seed 5001 --reward_func exp --curr_style fixed
-python code/scripts/train_treadmill_agent_jax.py --exp_title gru_block_fixed_seed_5002 --rnn_type GRU --seed 5002 --reward_func block --curr_style fixed
-python code/scripts/train_treadmill_agent_jax.py --exp_title gru_block_fixed_seed_5003 --rnn_type GRU --seed 5003 --reward_func block --curr_style fixed
+# python code/scripts/train_treadmill_agent_jax.py --exp_title gru_exp_indep_pred_all_tau_0.001_gamma_0.999_seed_8002 --rnn_type GRU --seed 8002 --reward_func exp --curr_style indep --gamma 0.999 --env_prediction_weight 0.001
 
-python code/scripts/train_treadmill_agent_jax.py --exp_title gru_exp_indep_seed_5004 --rnn_type GRU --seed 5004 --reward_func exp --curr_style indep
-python code/scripts/train_treadmill_agent_jax.py --exp_title gru_exp_indep_seed_5005 --rnn_type GRU --seed 5005 --reward_func exp --curr_style indep
-python code/scripts/train_treadmill_agent_jax.py --exp_title gru_block_indep_seed_5006 --rnn_type GRU --seed 5006 --reward_func block --curr_style indep
-python code/scripts/train_treadmill_agent_jax.py --exp_title gru_block_indep_seed_5007 --rnn_type GRU --seed 5007 --reward_func block --curr_style indep
+python code/scripts/train_treadmill_agent_jax.py --exp_title gru_exp_indep_pred_global_reward_100_alpha_0.9997_seed_8002 --rnn_type GRU --seed 8002 --reward_func exp --curr_style indep --gamma 0.999 --global_reward_weight 100
+# python code/scripts/train_treadmill_agent_jax.py --exp_title gru_exp_indep_pred_global_reward_1_gamma_0.999_seed_8002 --rnn_type GRU --seed 8002 --reward_func exp --curr_style indep --gamma 0.999 --global_reward_weight 1
