@@ -321,6 +321,8 @@ def train_step(
 # Configuration matching your original hyperparameters
 @struct.dataclass
 class TrainingConfig:
+
+
     # Environment
     exp_name: str = ''
     num_envs: int = 64
@@ -329,9 +331,18 @@ class TrainingConfig:
     action_size: int = 2
     dwell_time_for_reward: int = 6
     reward_site_len: int = 3
-    input_noise_std: float = 0
+    input_noise_std: float = 1e-2
+    unit_noise_std: float = 1e-2
     reward_param_style: int = 0
     reward_func_type: int = 0
+    reward_decay_consts: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0.0, 10.0, 30.0]))
+    reward_prob_prefactors: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0.8, 0.8, 0.8]))
+
+    reward_decay_range: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0.0, 40.0]))
+    interreward_len_bounds: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([1.0, 6.0]))
+    interreward_len_decay_rate: float = 0.8
+    interpatch_len_bounds: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([1.0, 12.0]))
+    interpatch_len_decay_rate: float = 0.1
 
     # Agent params
     hidden_size: int = 128
@@ -341,9 +352,8 @@ class TrainingConfig:
     global_reward_weight: float = 0
     activity_norm_weight: float = 1e-4
     pred_obs_weight: float = 0
-    gamma: float = 0.997 # 0.987
-    learning_rate: float = 2.5e-5
-    unit_noise_std: float = 1e-4
+    gamma: float = 0.999 # 0.987
+    learning_rate: float = 2.5e-5 # 1e-4
     rnn_type: str = 'GRU'
 
     # Training params (runtime configurable)
@@ -375,6 +385,18 @@ def load_config_from_json(filepath: str) -> TrainingConfig:
         config_dict['reward_param_style'] = reward_param_style_str_to_int(config_dict['reward_param_style'])
     if 'reward_func_type' in config_dict:
         config_dict['reward_func_type'] = reward_func_type_str_to_int(config_dict['reward_func_type'])
+
+    # Convert list fields to JAX arrays
+    if 'reward_decay_consts' in config_dict:
+        config_dict['reward_decay_consts'] = jnp.array(config_dict['reward_decay_consts'])
+    if 'reward_prob_prefactors' in config_dict:
+        config_dict['reward_prob_prefactors'] = jnp.array(config_dict['reward_prob_prefactors'])
+    if 'reward_decay_range' in config_dict:
+        config_dict['reward_decay_range'] = jnp.array(config_dict['reward_decay_range'])
+    if 'interreward_len_bounds' in config_dict:
+        config_dict['interreward_len_bounds'] = jnp.array(config_dict['interreward_len_bounds'])
+    if 'interpatch_len_bounds' in config_dict:
+        config_dict['interpatch_len_bounds'] = jnp.array(config_dict['interpatch_len_bounds'])
 
     # Start with defaults and update with loaded values
     config = TrainingConfig()
@@ -440,24 +462,31 @@ def run_session_updates_with_metrics(
     return final_train_state, final_env_states, all_metrics
 
 
-def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: bool = True):
+def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
     """Main training function that matches your existing structure"""
-    
+
     if config is None:
         config = TrainingConfig()
-    
+
     print("Starting JAX A2C Training...")
     print(f"Num envs: {config.num_envs}")
     print(f"Sessions: {config.n_sessions}")
     print(f"Updates per session: {N_UPDATES_PER_SESSION}")
     print(f"Steps per update: {N_STEPS_PER_UPDATE}")
-    
+
     # Initialize everything
     rng_key = random.key(config.seed)
     env_params = treadmill_session_default_params()
     env_params = env_params.replace(
         reward_param_style=config.reward_param_style,
         reward_func_type=config.reward_func_type,
+        reward_decay_consts=config.reward_decay_consts,
+        reward_prob_prefactors=config.reward_prob_prefactors,
+        reward_decay_range=config.reward_decay_range,
+        interreward_len_bounds=config.interreward_len_bounds,
+        interreward_len_decay_rate=config.interreward_len_decay_rate,
+        interpatch_len_bounds=config.interpatch_len_bounds,
+        interpatch_len_decay_rate=config.interpatch_len_decay_rate,
     )
 
     net_init_key, rng_key = random.split(rng_key)
@@ -609,6 +638,13 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
     env_params = env_params.replace(
         reward_param_style=config.reward_param_style,
         reward_func_type=config.reward_func_type,
+        reward_decay_consts=config.reward_decay_consts,
+        reward_prob_prefactors=config.reward_prob_prefactors,
+        reward_decay_range=config.reward_decay_range,
+        interreward_len_bounds=config.interreward_len_bounds,
+        interreward_len_decay_rate=config.interreward_len_decay_rate,
+        interpatch_len_bounds=config.interpatch_len_bounds,
+        interpatch_len_decay_rate=config.interpatch_len_decay_rate,
     )
 
     session_steps = N_UPDATES_PER_SESSION * N_STEPS_PER_UPDATE
@@ -864,8 +900,8 @@ def main():
                 rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
                 reward_param_style=reward_param_style_str_to_int(args.curr_style),
                 reward_func_type=reward_func_type_str_to_int(args.reward_func),
-                unit_noise_std=0,
-                input_noise_std=0.02,
+                unit_noise_std=0.01,
+                input_noise_std=0.01,
             )
 
     if args.test:
