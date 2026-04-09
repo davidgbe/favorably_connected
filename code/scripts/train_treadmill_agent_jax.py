@@ -171,9 +171,6 @@ def compute_a2c_loss(
         + pred_obs_weight * pred_obs_loss
         + global_reward_weight * global_reward_rate_loss
     )
-
-    # jax.debug.print('total: {x}', x=total_loss)
-    # jax.debug.print('pred_obs: {x}', x=10 * global_reward_rate_loss)
     
     metrics = {
         'total_loss': total_loss,
@@ -297,8 +294,7 @@ def train_step(
     optimizer = optax.chain(
         optax.clip_by_global_norm(0.5),   # try values 0.3 – 1.0 depending on stability
         optax.apply_if_finite(
-            # optax.adam(train_state.learning_rate),
-            optax.rmsprop(train_state.learning_rate, eps_in_sqrt=False, decay=0.99),
+            optax.adam(train_state.learning_rate),
             max_consecutive_errors=100,
         ),
     )

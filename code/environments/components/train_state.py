@@ -28,8 +28,7 @@ def init_opt(params : Any, learning_rate : float):
     optimizer = optax.chain(
         optax.clip_by_global_norm(0.5),   # try values 0.3 – 1.0 depending on stability
         optax.apply_if_finite(
-            # optax.adam(learning_rate),
-            optax.rmsprop(learning_rate, eps_in_sqrt=False, decay=0.99),
+            optax.adam(learning_rate),
             max_consecutive_errors=100,
         ),
     )
