@@ -9,12 +9,12 @@ class A2CRNNFlax(nn.Module):
     obs_size: int
     hidden_size: int
     rnn_type: str = 'GRU'  # 'VANILLA' or 'GRU'
-    var_noise: float = 1e-4
+    unit_noise_std: float = 1e-4
     
     def setup(self):
         if self.rnn_type == 'VANILLA':
-            self.rnn_actor = VanillaRNNCell(self.hidden_size, self.var_noise)
-            self.rnn_critic = VanillaRNNCell(self.hidden_size, self.var_noise)
+            self.rnn_actor = VanillaRNNCell(self.hidden_size, self.unit_noise_std)
+            self.rnn_critic = VanillaRNNCell(self.hidden_size, self.unit_noise_std)
         elif self.rnn_type == 'GRU':
             self.rnn_actor = nn.GRUCell(
                 features=self.hidden_size,
@@ -41,17 +41,31 @@ class A2CRNNFlax(nn.Module):
         """
         Args:
             x: input (batch_size, input_dim)
-            actor_hidden: (batch_size, hidden_size) 
+            actor_hidden: (batch_size, hidden_size)
             critic_hidden: (batch_size, hidden_size)
         Returns:
             logits, value, new_actor_hidden, new_critic_hidden
         """
         # Actor RNN
         new_actor_hidden, actor_outputs = self.rnn_actor(actor_hidden, x)
-        logits = self.actor(actor_outputs)
-        
-        # Critic RNN  
+
+        # Critic RNN
         new_critic_hidden, critic_outputs = self.rnn_critic(critic_hidden, x)
+
+        # Apply noise to hidden states
+        noise_actor = random.normal(
+            self.make_rng('noise'),
+            new_actor_hidden.shape
+        ) * self.unit_noise_std
+        new_actor_hidden = new_actor_hidden + noise_actor
+
+        noise_critic = random.normal(
+            self.make_rng('noise'),
+            new_critic_hidden.shape
+        ) * self.unit_noise_std
+        new_critic_hidden = new_critic_hidden + noise_critic
+
+        logits = self.actor(actor_outputs)
         value = self.critic(critic_outputs).squeeze(-1)
 
         pred_env_quality = self.env_quality_prediction(actor_outputs)
@@ -61,7 +75,7 @@ class A2CRNNFlax(nn.Module):
             self.obs_pred_layer_1(actor_outputs)
         )
         obs_pred = self.obs_prediction(obs_pred_h)
-        
+
         return logits, value, new_actor_hidden, new_critic_hidden, pred_env_quality, obs_pred, pred_exp_filtered_reward_rate
     
     
@@ -70,7 +84,7 @@ def init_network_and_params(
     action_size: int,
     obs_size: int,
     rnn_type: str,
-    var_noise: float,
+    unit_noise_std: float,
     rng_key: jnp.ndarray,
 ):
     # Network input size: obs + prev_obs + prev_action + prev_reward
@@ -82,7 +96,7 @@ def init_network_and_params(
         obs_size=obs_size,
         hidden_size=hidden_size, 
         rnn_type=rnn_type,
-        var_noise=var_noise,
+        unit_noise_std=unit_noise_std,
     )
     
     # Initialize parameters

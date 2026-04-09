@@ -52,7 +52,7 @@ def collect_trajectory(
     env_states: TreadmillEnvState, 
     env_params: TreadmillEnvParams,
     input_noise_std: float,
-    var_noise: float,
+    unit_noise_std: float,
     rnn_type: str,
     hidden_size: int,
     obs_size: int,
@@ -63,7 +63,7 @@ def collect_trajectory(
     network = A2CRNNFlax(
         action_size=2,  # Fixed ACTION_SIZE
         hidden_size=hidden_size,  # This should come from config
-        var_noise=var_noise,   # This should come from config,
+        unit_noise_std=unit_noise_std,   # This should come from config,
         rnn_type=rnn_type,
         obs_size=obs_size,
     )
@@ -122,9 +122,6 @@ def collect_trajectory(
         new_env_states = new_env_states.replace(
             exp_filtered_reward_rate=new_reward_rate,
         )
-
-        # jax.debug.print('{x}', x=new_reward_rate)
-        print(new_reward_rate.shape)
         
         # Update train state with new info
         new_train_state = train_state.replace(

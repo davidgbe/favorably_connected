@@ -6,7 +6,7 @@ import jax
 class VanillaRNNCell(nn.Module):
     """Vanilla RNN cell with custom initializers"""
     hidden_size: int
-    var_noise: float = 0
+    unit_noise_std: float = 0
     
     def setup(self):
         # Input projection with default initializers
@@ -32,12 +32,5 @@ class VanillaRNNCell(nn.Module):
         """
         input_contrib = self.input_projection(x)
         new_hidden = nn.relu(self.hidden_projection(hidden + input_contrib))
-        
-        # Add noise if specified
-        noise = random.normal(
-            self.make_rng('noise'), 
-            new_hidden.shape
-        ) * jnp.sqrt(self.var_noise)
-        new_hidden = new_hidden + noise
-            
+
         return new_hidden, new_hidden

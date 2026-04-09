@@ -23,7 +23,7 @@ from flax.training import checkpoints
 from flax import linen as nn
 from flax.traverse_util import flatten_dict
 import optax
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any, Optional, List
 from functools import partial
 import numpy as np
 from tqdm.auto import trange
@@ -79,7 +79,7 @@ def compute_a2c_loss(
     activity_norm_weight: float,
     pred_obs_weight: float,
     input_noise_std: float,
-    var_noise: float,
+    unit_noise_std: float,
     rnn_type: str,
     hidden_size: int,
     obs_size: int,
@@ -95,7 +95,7 @@ def compute_a2c_loss(
         env_states=env_states,
         env_params=env_params,
         input_noise_std=input_noise_std,
-        var_noise=var_noise,
+        unit_noise_std=unit_noise_std,
         rnn_type=rnn_type,
         hidden_size=hidden_size,
         obs_size=obs_size,
@@ -264,7 +264,7 @@ def train_step(
     input_noise_std: float,
     action_size: int,
     hidden_size: int,
-    var_noise: float,
+    unit_noise_std: float,
     rnn_type: str,
     obs_size: int,
 ) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
@@ -285,7 +285,7 @@ def train_step(
         activity_norm_weight,
         pred_obs_weight,
         input_noise_std,
-        var_noise,
+        unit_noise_std,
         rnn_type,
         hidden_size,
         obs_size,
@@ -343,7 +343,7 @@ class TrainingConfig:
     pred_obs_weight: float = 0
     gamma: float = 0.997 # 0.987
     learning_rate: float = 2.5e-5
-    var_noise: float = 1e-4
+    unit_noise_std: float = 1e-4
     rnn_type: str = 'GRU'
 
     # Training params (runtime configurable)
@@ -381,7 +381,7 @@ def load_config_from_json(filepath: str) -> TrainingConfig:
     return config.replace(**config_dict)
 
 
-@partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'var_noise', 'rnn_type', 'obs_size'])
+@partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'unit_noise_std', 'rnn_type', 'obs_size'])
 def run_session_updates_with_metrics(
     train_state: TrainState,
     env_states: TreadmillEnvState,
@@ -396,7 +396,7 @@ def run_session_updates_with_metrics(
     input_noise_std: float,
     action_size: int,
     hidden_size: int,
-    var_noise: float,
+    unit_noise_std: float,
     rnn_type: str,
     obs_size: int,
 ) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
@@ -419,7 +419,7 @@ def run_session_updates_with_metrics(
             input_noise_std=input_noise_std,
             action_size=action_size,
             hidden_size=hidden_size,
-            var_noise=var_noise,
+            unit_noise_std=unit_noise_std,
             rnn_type=rnn_type,
             obs_size=obs_size,
         )
@@ -467,7 +467,7 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
         action_size=config.action_size,
         obs_size=config.obs_size,
         rnn_type=config.rnn_type,
-        var_noise=config.var_noise,
+        unit_noise_std=config.unit_noise_std,
         rng_key=net_init_key,
     )
     
@@ -550,7 +550,7 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
             input_noise_std=config.input_noise_std,
             action_size=config.action_size,
             hidden_size=config.hidden_size,
-            var_noise=config.var_noise,
+            unit_noise_std=config.unit_noise_std,
             rnn_type=config.rnn_type,
             obs_size=config.obs_size,
         )
@@ -620,7 +620,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
         action_size=config.action_size,
         obs_size=config.obs_size,
         rnn_type=config.rnn_type,
-        var_noise=config.var_noise,
+        unit_noise_std=config.unit_noise_std,
         rng_key=net_init_key,
     )
     
@@ -675,7 +675,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
             env_states=env_states,
             env_params=env_params,
             input_noise_std=config.input_noise_std,  # No noise during evaluation
-            var_noise=config.var_noise,
+            unit_noise_std=config.unit_noise_std,
             rnn_type=config.rnn_type,
             hidden_size=config.hidden_size,
             obs_size=config.obs_size,
@@ -748,6 +748,47 @@ def reward_func_type_str_to_int(func_type):
         raise ValueError(f"Unknown reward func type: {func_type}. Options: {', '.join([e.name.lower() for e in RewardFuncType])}")
 
 
+def train_and_evaluate_network(config: TrainingConfig) -> Tuple[Dict, List]:
+    """Train a network and then automatically evaluate it.
+
+    Args:
+        config: TrainingConfig for this network
+
+    Returns:
+        (results_dict, training_rewards_list)
+        - results_dict: results from evaluate_a2c_jax containing eval metrics
+        - training_rewards_list: per-session rewards from training
+    """
+    print(f"\n{'='*60}")
+    print(f"Training network with exp_name: {config.exp_name}, seed: {config.seed}")
+    print(f"{'='*60}\n")
+
+    # Train
+    final_train_state, training_rewards = train_a2c_jax(config)
+    print("\nTraining Summary:")
+    print(f"  Final average reward: {np.mean(training_rewards[-10:]):.4f}")
+    print(f"  Best average reward: {np.max(training_rewards):.4f}")
+
+    # Auto-evaluate after training completes
+    eval_config = config.replace(
+        n_sessions=30,
+        num_envs=1,
+    )
+    checkpoint_path = str(Path(f"checkpoints/{config.exp_name}").resolve())
+
+    print(f"\nEvaluating network from checkpoint: {checkpoint_path}\n")
+    results, _ = evaluate_a2c_jax(
+        config=eval_config,
+        checkpoint_path=checkpoint_path,
+        save_trajectories=False
+    )
+
+    print(f"\nEvaluation Summary:")
+    print(f"  Mean reward rate: {results['mean_reward_rate']:.4f} ± {results['std_reward_rate']:.4f}")
+
+    return results, training_rewards
+
+
 def main():
     # PARSE ARGUMENTS
     parser = argparse.ArgumentParser()
@@ -767,6 +808,7 @@ def main():
     parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to checkpoint for testing')
     parser.add_argument('--test_sessions', type=int, default=30, help='Number of episodes to run in test mode')
     parser.add_argument('--save_trajectories', action='store_true', help='Save trajectory data during testing')
+    parser.add_argument('--n_networks', type=int, default=1, help='Number of sequential networks to train (default: 1)')
     args = parser.parse_args()
 
     """Entry point for training or evaluation"""
@@ -800,7 +842,7 @@ def main():
                 rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
                 reward_param_style=reward_param_style_str_to_int(args.curr_style),
                 reward_func_type=reward_func_type_str_to_int(args.reward_func),
-                var_noise=0,
+                unit_noise_std=0,
                 input_noise_std=0 #0.02,
             )
         else:
@@ -822,7 +864,7 @@ def main():
                 rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
                 reward_param_style=reward_param_style_str_to_int(args.curr_style),
                 reward_func_type=reward_func_type_str_to_int(args.reward_func),
-                var_noise=0,
+                unit_noise_std=0,
                 input_noise_std=0.02,
             )
 
@@ -839,13 +881,46 @@ def main():
         print(f"\nTest completed! Mean reward: {results['mean_reward_rate']:.4f}")
     else:
         print("Running in TRAINING mode")
-        print(config)
+        print(f"Training {args.n_networks} network(s)\n")
 
-        final_train_state, rewards = train_a2c_jax(config)
+        all_results = []
 
-        print("\nTraining Summary:")
-        print(f"Final average reward: {np.mean(rewards[-10:]):.4f}")
-        print(f"Best average reward: {np.max(rewards):.4f}")
+        for network_idx in range(args.n_networks):
+            # Modify config for this network
+            network_seed = config.seed + network_idx
+            network_exp_name = f"{config.exp_name}_net{network_idx}" if args.n_networks > 1 else config.exp_name
+
+            network_config = config.replace(
+                seed=network_seed,
+                exp_name=network_exp_name,
+            )
+
+            # Train and evaluate this network
+            results, training_rewards = train_and_evaluate_network(network_config)
+            all_results.append({
+                'network': network_idx,
+                'seed': network_seed,
+                'exp_name': network_exp_name,
+                'eval_results': results,
+                'training_rewards': training_rewards,
+            })
+
+        # Print summary for all networks
+        print(f"\n{'='*60}")
+        print("MULTI-NETWORK TRAINING SUMMARY")
+        print(f"{'='*60}\n")
+
+        for result in all_results:
+            print(f"Network {result['network']} (seed {result['seed']}):")
+            print(f"  Mean eval reward rate: {result['eval_results']['mean_reward_rate']:.4f} ± {result['eval_results']['std_reward_rate']:.4f}")
+            print(f"  Training: final avg = {np.mean(result['training_rewards'][-10:]):.4f}, best = {np.max(result['training_rewards']):.4f}\n")
+
+        # Final summary - just the eval reward rates
+        print(f"\n{'='*60}")
+        print("FINAL TEST REWARD RATES")
+        print(f"{'='*60}\n")
+        for result in all_results:
+            print(f"Network {result['network']} (seed {result['seed']}): {result['eval_results']['mean_reward_rate']:.4f} ± {result['eval_results']['std_reward_rate']:.4f}")
 
 
 if __name__ == "__main__":
