@@ -1,5 +1,5 @@
 {
-  "exp_name": "default_run",
+  "exp_name": "fixed_exp_gru_reward_decay",
   "num_envs": 128,
   "patch_types_per_env": 3,
   "dwell_time_for_reward": 6,
