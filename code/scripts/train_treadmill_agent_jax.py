@@ -6,7 +6,6 @@ if __name__ == '__main__':
     curr_file_path = Path(__file__)
     sys.path.append(str(curr_file_path.parent.parent))
 
-
 # Fix for JAX/Optax version compatibility
 import jax
 import jax.numpy as jnp
@@ -17,6 +16,7 @@ import jax.numpy as jnp
 if not hasattr(jnp, 'DeviceArray'):
     jnp.DeviceArray = jax.Array
 
+# external imports
 from jax import random, lax
 from flax import struct, serialization
 from flax.training import checkpoints
@@ -29,7 +29,12 @@ import numpy as np
 from tqdm.auto import trange
 import argparse
 import pickle
+import json
 from datetime import datetime
+from pprint import pprint
+from enum import IntEnum
+
+# internal imports
 from aux_funcs import zero_pad
 from agents.a2c_rnn_flax import A2CRNNFlax, init_network_and_params
 from environments.components.train_state import TrainState, create_train_state, init_opt
@@ -41,40 +46,24 @@ from environments.treadmill_env_jax import (
     TreadmillEnvState, 
     treadmill_session_default_params
 )
-from pprint import pprint
+
+
+# Enums for reward configuration
+class RewardParamStyle(IntEnum):
+    FIXED = 0
+    INDEP = 1
+    COUPLED = 2
+
+
+class RewardFuncType(IntEnum):
+    EXP = 0
+    BLOCK = 1
+    MARKOV = 2
+
 
 # Compile-time constants for JAX JIT compatibility
 N_UPDATES_PER_SESSION = 100
 N_STEPS_PER_UPDATE = 200
-
-
-# PARSE ARGUMENTS
-parser = argparse.ArgumentParser()
-parser.add_argument('--exp_title', metavar='et', type=str, default='run')
-parser.add_argument('--noise_var', metavar='nv', type=float, default=1e-4)
-parser.add_argument('--activity_reg', metavar='ar', type=float, default=1)
-parser.add_argument('--gamma', metavar='g', type=float, default=0.997)
-parser.add_argument('--env_prediction_weight', metavar='epw', type=float, default=0) # 0.001
-parser.add_argument('--global_reward_weight', metavar='grw', type=float, default=0) # 0.001
-parser.add_argument('--curr_style', metavar='cs', type=str, default='fixed')
-parser.add_argument('--reward_func', metavar='rf', type=str, default='exp')
-parser.add_argument('--agent_type', metavar='at', type=str, default='split')
-parser.add_argument('--rnn_type', metavar='rt', type=str, default='VANILLA')
-parser.add_argument('--seed', metavar='s', type=int, default=0)
-# New test mode arguments
-parser.add_argument('--test', action='store_true', help='Run in test/evaluation mode')
-parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to checkpoint for testing')
-parser.add_argument('--test_sessions', type=int, default=30, help='Number of episodes to run in test mode')
-parser.add_argument('--save_trajectories', action='store_true', help='Save trajectory data during testing')
-args = parser.parse_args()
-
-# Import your existing JAX environment
-from environments.treadmill_env_jax import (
-    TreadmillEnvironment, 
-    TreadmillEnvParams, 
-    TreadmillEnvState, 
-    treadmill_session_default_params
-)
 
 
 def compute_a2c_loss(
@@ -87,6 +76,8 @@ def compute_a2c_loss(
     entropy_weight: float,
     env_prediction_weight: float,
     global_reward_weight: float,
+    activity_norm_weight: float,
+    pred_obs_weight: float,
     input_noise_std: float,
     var_noise: float,
     rnn_type: str,
@@ -175,10 +166,9 @@ def compute_a2c_loss(
         actor_loss
         + critic_weight * critic_loss
         + entropy_weight * entropy_loss
-        # + 1e-2 * activity_norm
-        + 1e-4 * activity_norm
+        + activity_norm_weight * activity_norm
         + env_prediction_weight * env_quality_prediction_loss
-        + 0 * pred_obs_loss
+        + pred_obs_weight * pred_obs_loss
         + global_reward_weight * global_reward_rate_loss
     )
 
@@ -269,6 +259,8 @@ def train_step(
     entropy_weight: float,
     env_prediction_weight: float,
     global_reward_weight: float,
+    activity_norm_weight: float,
+    pred_obs_weight: float,
     input_noise_std: float,
     action_size: int,
     hidden_size: int,
@@ -290,6 +282,8 @@ def train_step(
         entropy_weight,
         env_prediction_weight,
         global_reward_weight,
+        activity_norm_weight,
+        pred_obs_weight,
         input_noise_std,
         var_noise,
         rnn_type,
@@ -312,7 +306,6 @@ def train_step(
         grads, train_state.opt_state, train_state.params
     )
     new_params = optax.apply_updates(train_state.params, updates)
-    train_state.params
     # Get updated states from metrics
     final_train_state = metrics['final_train_state']
     final_env_states = metrics['final_env_states']
@@ -328,7 +321,7 @@ def train_step(
 # Configuration matching your original hyperparameters
 @struct.dataclass
 class TrainingConfig:
-    # Environment 
+    # Environment
     exp_name: str = ''
     num_envs: int = 64
     patch_types_per_env: int = 3
@@ -339,23 +332,53 @@ class TrainingConfig:
     input_noise_std: float = 0
     reward_param_style: int = 0
     reward_func_type: int = 0
-    
-    # Agent params  
+
+    # Agent params
     hidden_size: int = 128
     critic_weight: float = 0.0785
     entropy_weight: float = 1.02e-6 # 1.02e-06
-    env_prediction_weight: float = 0.001
+    env_prediction_weight: float = 0 # 0.001
     global_reward_weight: float = 0
+    activity_norm_weight: float = 1e-4
+    pred_obs_weight: float = 0
     gamma: float = 0.997 # 0.987
     learning_rate: float = 2.5e-5
     var_noise: float = 1e-4
     rnn_type: str = 'GRU'
-    
+
     # Training params (runtime configurable)
+    seed: int = 0
     n_sessions: int = 5000
-    
+
     # Logging
     output_state_save_rate: int = 100
+
+
+def save_config_to_json(config: TrainingConfig, filepath: str) -> None:
+    """Save TrainingConfig to JSON, converting int enums to readable strings."""
+    config_dict = serialization.to_state_dict(config)
+    # Convert ints to strings for readability
+    config_dict['reward_param_style'] = RewardParamStyle(config_dict['reward_param_style']).name.lower()
+    config_dict['reward_func_type'] = RewardFuncType(config_dict['reward_func_type']).name.lower()
+    with open(filepath, 'w') as f:
+        json.dump(config_dict, f, indent=2)
+
+
+def load_config_from_json(filepath: str) -> TrainingConfig:
+    """Load TrainingConfig from JSON, converting string enums back to ints.
+    Missing fields will use their defaults from TrainingConfig."""
+    with open(filepath, 'r') as f:
+        config_dict = json.load(f)
+
+    # Convert strings back to ints (only if present)
+    if 'reward_param_style' in config_dict:
+        config_dict['reward_param_style'] = reward_param_style_str_to_int(config_dict['reward_param_style'])
+    if 'reward_func_type' in config_dict:
+        config_dict['reward_func_type'] = reward_func_type_str_to_int(config_dict['reward_func_type'])
+
+    # Start with defaults and update with loaded values
+    config = TrainingConfig()
+    return config.replace(**config_dict)
 
 
 @partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'var_noise', 'rnn_type', 'obs_size'])
@@ -368,6 +391,8 @@ def run_session_updates_with_metrics(
     entropy_weight: float,
     env_prediction_weight: float,
     global_reward_weight: float,
+    activity_norm_weight: float,
+    pred_obs_weight: float,
     input_noise_std: float,
     action_size: int,
     hidden_size: int,
@@ -382,13 +407,15 @@ def run_session_updates_with_metrics(
         
         new_train_state, new_env_states, metrics = train_step(
             train_state=train_state,
-            env_states=env_states, 
+            env_states=env_states,
             env_params=env_params,
             gamma=gamma,
             critic_weight=critic_weight,
             entropy_weight=entropy_weight,
             env_prediction_weight=env_prediction_weight,
             global_reward_weight=global_reward_weight,
+            activity_norm_weight=activity_norm_weight,
+            pred_obs_weight=pred_obs_weight,
             input_noise_std=input_noise_std,
             action_size=action_size,
             hidden_size=hidden_size,
@@ -426,7 +453,7 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
     print(f"Steps per update: {N_STEPS_PER_UPDATE}")
     
     # Initialize everything
-    rng_key = random.key(args.seed)
+    rng_key = random.key(config.seed)
     env_params = treadmill_session_default_params()
     env_params = env_params.replace(
         reward_param_style=config.reward_param_style,
@@ -511,13 +538,15 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None, train: b
         
         train_state, env_states, all_metrics = run_session_updates_with_metrics(
             train_state=train_state,
-            env_states=env_states, 
+            env_states=env_states,
             env_params=env_params,
             gamma=config.gamma,
             critic_weight=config.critic_weight,
             entropy_weight=config.entropy_weight,
             env_prediction_weight=config.env_prediction_weight,
             global_reward_weight=config.global_reward_weight,
+            activity_norm_weight=config.activity_norm_weight,
+            pred_obs_weight=config.pred_obs_weight,
             input_noise_std=config.input_noise_std,
             action_size=config.action_size,
             hidden_size=config.hidden_size,
@@ -575,7 +604,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
     print(f"Save trajectories: {save_trajectories}")
     
     # Initialize everything
-    rng_key = random.key(args.seed)
+    rng_key = random.key(config.seed)
     env_params = treadmill_session_default_params()
     env_params = env_params.replace(
         reward_param_style=config.reward_param_style,
@@ -706,91 +735,114 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
 
 
 def reward_param_style_str_to_int(style):
-    if style == 'fixed':
-        return 0
-    elif style == 'indep':
-        return 1
-    elif style == 'coupled':
-        return 2
-    else:
-        raise NotImplementedError('reward param style not found')
-    
+    try:
+        return RewardParamStyle[style.upper()].value
+    except KeyError:
+        raise ValueError(f"Unknown reward param style: {style}. Options: {', '.join([e.name.lower() for e in RewardParamStyle])}")
+
 
 def reward_func_type_str_to_int(func_type):
-    if func_type == 'exp':
-        return 0
-    elif func_type == 'block':
-        return 1
-    elif func_type == 'markov':
-        return 2
-    else:
-        raise NotImplementedError('reward func type not found')
+    try:
+        return RewardFuncType[func_type.upper()].value
+    except KeyError:
+        raise ValueError(f"Unknown reward func type: {func_type}. Options: {', '.join([e.name.lower() for e in RewardFuncType])}")
 
 
 def main():
+    # PARSE ARGUMENTS
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', type=str, default=None, help='Path to JSON config file')
+    parser.add_argument('--exp_title', metavar='et', type=str, default='run')
+    parser.add_argument('--noise_var', metavar='nv', type=float, default=1e-4)
+    parser.add_argument('--activity_reg', metavar='ar', type=float, default=1)
+    parser.add_argument('--gamma', metavar='g', type=float, default=0.997)
+    parser.add_argument('--env_prediction_weight', metavar='epw', type=float, default=0) # 0.001
+    parser.add_argument('--global_reward_weight', metavar='grw', type=float, default=0) # 0.001
+    parser.add_argument('--curr_style', metavar='cs', type=str, default='fixed')
+    parser.add_argument('--reward_func', metavar='rf', type=str, default='exp')
+    parser.add_argument('--agent_type', metavar='at', type=str, default='split')
+    parser.add_argument('--rnn_type', metavar='rt', type=str, default='VANILLA')
+    parser.add_argument('--seed', metavar='s', type=int, default=0)
+    parser.add_argument('--test', action='store_true', help='Run in test/evaluation mode')
+    parser.add_argument('--checkpoint_path', type=str, default=None, help='Path to checkpoint for testing')
+    parser.add_argument('--test_sessions', type=int, default=30, help='Number of episodes to run in test mode')
+    parser.add_argument('--save_trajectories', action='store_true', help='Save trajectory data during testing')
+    args = parser.parse_args()
+
     """Entry point for training or evaluation"""
     time_stamp = str(datetime.now()).replace(' ', '_')
-    exp_name = f'{args.exp_title}_seed_{args.seed}_{time_stamp}'
-    
+
+    # Load config from JSON if provided
+    if args.config:
+        print(f"Loading config from {args.config}")
+        config = load_config_from_json(args.config)
+        # Update exp_name with timestamp if not set in config
+        if not config.exp_name or config.exp_name == '':
+            config = config.replace(exp_name=f"json_config_{time_stamp}")
+    else:
+        # Build config from command-line arguments (original behavior)
+        exp_name = f'{args.exp_title}_seed_{args.seed}_{time_stamp}'
+
+        if args.test:
+            # Test/Evaluation mode
+            if args.checkpoint_path is None:
+                print("Error: --checkpoint_path required for test mode")
+                return
+
+            # You can customize the config here
+            config = TrainingConfig(
+                seed=args.seed,
+                exp_name=exp_name,
+                n_sessions=args.test_sessions,
+                num_envs=1,  # Single env for cleaner episode tracking
+                hidden_size=64,
+                obs_size=4,
+                rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
+                reward_param_style=reward_param_style_str_to_int(args.curr_style),
+                reward_func_type=reward_func_type_str_to_int(args.reward_func),
+                var_noise=0,
+                input_noise_std=0 #0.02,
+            )
+        else:
+            # Training mode (original behavior)
+            config = TrainingConfig(
+                seed=args.seed,
+                exp_name=exp_name,
+                n_sessions=5000,
+                num_envs=128,
+                learning_rate=1e-4, #1e-4 for GRU, 2e-5, smaller for relu
+                entropy_weight=2.5e-3,# for relu 2.5e-5, GRU benefits from larger entropy bonus, like 2.5e-3
+                critic_weight=0.05, # 0.5 originally for GRU, 0.04 for relu,
+                env_prediction_weight=args.env_prediction_weight, # 0.001,
+                global_reward_weight=args.global_reward_weight,
+                gamma=args.gamma,
+                hidden_size=64, #64
+                obs_size=4,
+                output_state_save_rate=50,
+                rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
+                reward_param_style=reward_param_style_str_to_int(args.curr_style),
+                reward_func_type=reward_func_type_str_to_int(args.reward_func),
+                var_noise=0,
+                input_noise_std=0.02,
+            )
+
     if args.test:
-        # Test/Evaluation mode
-        if args.checkpoint_path is None:
-            print("Error: --checkpoint_path required for test mode")
-            return
-            
-        # You can customize the config here
-        config = TrainingConfig(
-            exp_name=exp_name,
-            n_sessions=args.test_sessions,
-            num_envs=1,  # Single env for cleaner episode tracking
-            hidden_size=64,
-            obs_size=4,
-            rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
-            reward_param_style=reward_param_style_str_to_int(args.curr_style),
-            reward_func_type=reward_func_type_str_to_int(args.reward_func),
-            var_noise=0,
-            input_noise_std=0 #0.02,
-        )
-        
         print("Running in TEST mode")
         print(config)
-        
+
         results, trajectories = evaluate_a2c_jax(
             config=config,
             checkpoint_path=os.path.join(os.getcwd(), args.checkpoint_path),
             save_trajectories=args.save_trajectories
         )
-        
+
         print(f"\nTest completed! Mean reward: {results['mean_reward_rate']:.4f}")
-        
     else:
-
-        # Training mode (original behavior)
-        config = TrainingConfig(
-            exp_name=exp_name,
-            n_sessions=5000,
-            num_envs=128,
-            learning_rate=1e-4, #1e-4 for GRU, 2e-5, smaller for relu
-            entropy_weight=2.5e-3,# for relu 2.5e-5, GRU benefits from larger entropy bonus, like 2.5e-3
-            critic_weight=0.05, # 0.5 originally for GRU, 0.04 for relu,
-            env_prediction_weight=args.env_prediction_weight, # 0.001,
-            global_reward_weight=args.global_reward_weight,
-            gamma=args.gamma,
-            hidden_size=64, #64
-            obs_size=4,
-            output_state_save_rate=50,
-            rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
-            reward_param_style=reward_param_style_str_to_int(args.curr_style),
-            reward_func_type=reward_func_type_str_to_int(args.reward_func),
-            var_noise=0,
-            input_noise_std=0.02,
-        )
-
         print("Running in TRAINING mode")
         print(config)
-            
+
         final_train_state, rewards = train_a2c_jax(config)
-        
+
         print("\nTraining Summary:")
         print(f"Final average reward: {np.mean(rewards[-10:]):.4f}")
         print(f"Best average reward: {np.max(rewards):.4f}")
