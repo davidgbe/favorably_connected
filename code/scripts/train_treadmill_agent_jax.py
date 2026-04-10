@@ -812,7 +812,7 @@ def train_and_evaluate_network(config: TrainingConfig) -> Tuple[Dict, List]:
     results, _ = evaluate_a2c_jax(
         config=eval_config,
         checkpoint_path=checkpoint_path,
-        save_trajectories=False
+        save_trajectories=True,
     )
 
     print(f"\nEvaluation Summary:")
