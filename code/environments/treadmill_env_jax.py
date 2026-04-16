@@ -536,9 +536,9 @@ def sample_truncated_exp(
     u = random.uniform(key)
     
     # Convert to truncated exponential using inverse CDF
-    # F(x) = (1 - exp(-decay_rate * x)) / (1 - exp(-decay_rate * max_val))
-    # for x in [0, max_val], then shift by min_val
-    
+    # F(x) = (1 - exp(-decay_rate * x)) / (1 - exp(-decay_rate * (max_val - min_val)))
+    # for x in [0, max_val - min_val], then shift by min_val
+
     exp_max = jnp.exp(-decay_rate * (max_val - min_val))
     sample = -jnp.log(1 - u * (1 - exp_max)) / decay_rate
     

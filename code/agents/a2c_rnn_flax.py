@@ -9,7 +9,7 @@ class A2CRNNFlax(nn.Module):
     obs_size: int
     hidden_size: int
     rnn_type: str = 'GRU'  # 'VANILLA' or 'GRU'
-    unit_noise_std: float = 1e-4
+    unit_noise_std: float = 1e-2
     
     def setup(self):
         if self.rnn_type == 'VANILLA':

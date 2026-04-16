@@ -74,7 +74,6 @@ def parse_behavioral_data(d, env_idx=None):
             'obs',
             'pred_environment_quality',
         ]
-
         
         features_to_time_series_dict = {}
         for f in features:
@@ -105,19 +104,25 @@ def parse_behavioral_data(d, env_idx=None):
     rewards_seen_in_patch = np.zeros((n_steps))
     rewards_seen_in_patch_type = np.zeros((n_steps, num_patch_types))
     total_stops_in_patch_type = np.zeros((n_steps, num_patch_types))
-    dwell_time = np.zeros((n_steps))
+    inter_odor_site_distances = np.full((n_steps,), np.nan)
+    rewarded_last_odor_site = np.zeros((n_steps,), dtype=bool)
 
-    dwell_times_at_positions = []
+    dwell_times_at_positions = [[1]]
     rewards_at_positions = [0]
     reward_attempted_at_positions = [False]
     dwell_time = 1
     last_p = None
     unique_patch_params = np.zeros((3))
+    last_reward_site_end = None
+    last_reward_site_start = None
+    inter_odor_site_distance = None
     
     for idx, p in enumerate(features_to_time_series_dict['current_position']):
 
+        new_position = (p != last_p)
+
         if last_p is not None:
-            if (p != last_p):
+            if new_position:
                 rewards_at_positions.append(0)
                 reward_attempted_at_positions.append(False)
                 dwell_times_at_positions.append([dwell_time])
@@ -128,23 +133,47 @@ def parse_behavioral_data(d, env_idx=None):
         dwell_times[idx] = dwell_time
         rewards_at_positions[-1] += features_to_time_series_dict['reward'][idx]
         reward_attempted_at_positions[-1] = True if features_to_time_series_dict['current_reward_site_attempted'][idx] else reward_attempted_at_positions[-1]
-        last_p = p
 
         if features_to_time_series_dict['agent_in_patch'][idx]:
             curr_patch_type = features_to_time_series_dict['current_patch_num'][idx]
             unique_patch_params[curr_patch_type] = features_to_time_series_dict['patch_reward_param'][idx]
             if idx > 0:
+                rewarded_last_odor_site[idx] = rewarded_last_odor_site[idx-1]
                 rewards_seen_in_patch[idx] = rewards_seen_in_patch[idx-1] + features_to_time_series_dict['reward'][idx]
+                    
+                odor_on = (features_to_time_series_dict['observations'][idx, 1:] > 0.5).any()
+                odor_on_prev = (features_to_time_series_dict['observations'][idx-1, 1:] > 0.5).any()
+
+                if new_position:
+                    if odor_on and not odor_on_prev:
+                        last_reward_site_start = p
+                        if last_reward_site_end is not None:
+                            inter_odor_site_distance = (int(last_reward_site_start) - int(last_reward_site_end)) if last_reward_site_end is not None else np.nan
+                            # if idx < 500:
+                            #     print(f'{idx}: {inter_odor_site_distance} {int(last_reward_site_start)} {int(last_reward_site_end)}')
+                    elif (not odor_on) and odor_on_prev:
+                        last_reward_site_end = p
             else:
                 rewards_seen_in_patch[idx] = features_to_time_series_dict['reward'][idx]
+            if inter_odor_site_distance is not None:
+                inter_odor_site_distances[idx] = inter_odor_site_distance
+        else:
+            last_reward_site_start = None
+            last_reward_site_end = None
+            inter_odor_site_distance = None
+            rewarded_last_odor_site[idx] = False
+
+        last_p = p
 
         if idx > 0:
             curr_patch_type = features_to_time_series_dict['current_patch_num'][idx]
             rewards_seen_in_patch_type[idx, :] = rewards_seen_in_patch_type[idx-1, :]
             rewards_seen_in_patch_type[idx, curr_patch_type] += features_to_time_series_dict['reward'][idx]
             total_stops_in_patch_type[idx, :] = total_stops_in_patch_type[idx-1, :]
+
             if features_to_time_series_dict['current_reward_site_attempted'][idx] and not features_to_time_series_dict['current_reward_site_attempted'][idx-1]:
                 total_stops_in_patch_type[idx, curr_patch_type] += 1
+                rewarded_last_odor_site[idx] = features_to_time_series_dict['reward'][idx] > 0
 
     features_to_time_series_dict['dwell_time'] = dwell_times
     features_to_time_series_dict['rewards_seen_in_patch'] = rewards_seen_in_patch
@@ -154,6 +183,8 @@ def parse_behavioral_data(d, env_idx=None):
     features_to_time_series_dict['rewards_at_positions'] = np.array(rewards_at_positions)
     features_to_time_series_dict['reward_attempted_at_positions'] = np.array(reward_attempted_at_positions)
     features_to_time_series_dict['unique_patch_reward_params'] = unique_patch_params
+    features_to_time_series_dict['inter_odor_site_distances'] = inter_odor_site_distances
+    features_to_time_series_dict['rewarded_last_odor_site'] = rewarded_last_odor_site
 
     
     return features_to_time_series_dict

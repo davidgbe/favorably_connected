@@ -706,8 +706,8 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
             train_state=train_state,
             env_states=env_states,
             env_params=env_params,
-            input_noise_std=config.input_noise_std,  # No noise during evaluation
-            unit_noise_std=config.unit_noise_std,
+            input_noise_std=0,  # No noise during evaluation
+            unit_noise_std=0,
             rnn_type=config.rnn_type,
             hidden_size=config.hidden_size,
             obs_size=config.obs_size,
