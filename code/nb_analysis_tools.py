@@ -119,7 +119,7 @@ def parse_behavioral_data(d, env_idx=None):
     
     for idx, p in enumerate(features_to_time_series_dict['current_position']):
 
-        new_position = (p != last_p)
+        new_position = ~np.isclose(p, last_p) if last_p is not None else True
 
         if last_p is not None:
             if new_position:
@@ -134,31 +134,27 @@ def parse_behavioral_data(d, env_idx=None):
         rewards_at_positions[-1] += features_to_time_series_dict['reward'][idx]
         reward_attempted_at_positions[-1] = True if features_to_time_series_dict['current_reward_site_attempted'][idx] else reward_attempted_at_positions[-1]
 
-        if features_to_time_series_dict['agent_in_patch'][idx]:
+        if features_to_time_series_dict['observations'][idx, 0] > 0.5:
             curr_patch_type = features_to_time_series_dict['current_patch_num'][idx]
             unique_patch_params[curr_patch_type] = features_to_time_series_dict['patch_reward_param'][idx]
             if idx > 0:
                 rewarded_last_odor_site[idx] = rewarded_last_odor_site[idx-1]
                 rewards_seen_in_patch[idx] = rewards_seen_in_patch[idx-1] + features_to_time_series_dict['reward'][idx]
                     
-                odor_on = (features_to_time_series_dict['observations'][idx, 1:] > 0.5).any()
-                odor_on_prev = (features_to_time_series_dict['observations'][idx-1, 1:] > 0.5).any()
+                odor_on = (features_to_time_series_dict['observations'][idx, 1:4] > 0.5).any()
+                odor_on_prev = (features_to_time_series_dict['observations'][idx-1, 1:4] > 0.5).any()
 
-                if new_position:
-                    if odor_on and not odor_on_prev:
-                        last_reward_site_start = p
-                        if last_reward_site_end is not None:
-                            inter_odor_site_distance = (int(last_reward_site_start) - int(last_reward_site_end)) if last_reward_site_end is not None else np.nan
-                            # if idx < 500:
-                            #     print(f'{idx}: {inter_odor_site_distance} {int(last_reward_site_start)} {int(last_reward_site_end)}')
-                    elif (not odor_on) and odor_on_prev:
-                        last_reward_site_end = p
+                if odor_on and not odor_on_prev:
+                    if last_reward_site_end is not None:
+                        inter_odor_site_distance = (np.rint(p - last_reward_site_end)) if last_reward_site_end is not None else None
+                elif (not odor_on) and odor_on_prev:
+                    last_reward_site_end = p-1
+
+                if inter_odor_site_distance is not None and odor_on:
+                    inter_odor_site_distances[idx] = inter_odor_site_distance
             else:
                 rewards_seen_in_patch[idx] = features_to_time_series_dict['reward'][idx]
-            if inter_odor_site_distance is not None:
-                inter_odor_site_distances[idx] = inter_odor_site_distance
         else:
-            last_reward_site_start = None
             last_reward_site_end = None
             inter_odor_site_distance = None
             rewarded_last_odor_site[idx] = False
@@ -241,9 +237,11 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
         hist_odor_site_data = []
         patch_count = 0
         rw_site_counter = 0
+        pt = None
         global_reward_rate_param = np.sum(np.unique(all_patch_reward_params))
 
         for i, pstart in enumerate(b_data['current_patch_start']):
+
             if last_pstart is None or (pstart != last_pstart).any():
                 pt = all_patch_nums[i]
                 ss['patches_entered_for_patch_type'][pt] += 1
@@ -272,6 +270,9 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
                     'patch_number': [patch_count],
                     'session_number': [session_number],
                 })
+
+                if pt == 0:
+                    print(rewards_seen_in_patch[i])
 
                 if rewards_seen_in_patch[i] < max_acc_reward:
                     ss['acc_reward_stop_opportunities_for_patch_type'][pt, int(rewards_seen_in_patch[i])] += 1
@@ -381,19 +382,17 @@ def load_trajectory_data(filepath: str) -> Tuple[List[Dict], Dict]:
     if not filepath.exists():
         raise FileNotFoundError(f"Trajectory file not found: {filepath}")
     
-    print(f"Loading trajectory data from: {filepath}")
+    # print(f"Loading trajectory data from: {filepath}")
     
     with open(filepath, 'rb') as f:
         trajectories = pickle.load(f)
-    
-    print(f"Loaded {len(trajectories)} episodes")
-    
+        
     # Extract metadata from first trajectory
     if trajectories:
         sample_traj = trajectories[0]
-        print(f"Episode length: {len(sample_traj['observations'])}")
-        print(f"Observation shape: {sample_traj['observations'].shape}")
-        print(f"Action shape: {sample_traj['actions'].shape}")
+        # print(f"Episode length: {len(sample_traj['observations'])}")
+        # print(f"Observation shape: {sample_traj['observations'].shape}")
+        # print(f"Action shape: {sample_traj['actions'].shape}")
         # print(f"Sample episode reward: {sample_traj['episode_reward']:.4f}")
     
     return trajectories
