@@ -25,6 +25,7 @@
   "learning_rate": 2e-4,
   "unit_noise_std": 0.01,
   "rnn_type": "GRU",
+  "init_scale": 1,
   "seed": 0,
   "n_sessions": 500,
   "output_state_save_rate": 50

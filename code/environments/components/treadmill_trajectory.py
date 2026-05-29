@@ -46,10 +46,10 @@ class TrajectoryData:
     pred_reward_rate: jnp.ndarray
 
 
-@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'n_steps', 'obs_size'])
+@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'n_steps', 'obs_size', 'intervention_fn'])
 def collect_trajectory(
     train_state: TrainState,
-    env_states: TreadmillEnvState, 
+    env_states: TreadmillEnvState,
     env_params: TreadmillEnvParams,
     input_noise_std: float,
     unit_noise_std: float,
@@ -57,8 +57,18 @@ def collect_trajectory(
     hidden_size: int,
     obs_size: int,
     n_steps: int,
+    intervention_fn=None,
 ) -> Tuple[TrajectoryData, TrainState, TreadmillEnvState]:
-    """Collect trajectory using lax.scan over time steps"""
+    """Collect trajectory using lax.scan over time steps.
+
+    intervention_fn: callable or None.
+        If provided, called as intervention_fn(actor_hidden) -> actor_hidden at every
+        timestep where the agent is exiting an odor site while still in the patch
+        (obs[1:4] transitions from high to low, obs[0] stays high).  The returned
+        hidden state is used only for environments where the condition fires; others
+        are left unchanged via jnp.where.
+        Pass None (default) during training so no intervention code is traced.
+    """
     
     network = A2CRNNFlax(
         action_size=2,  # Fixed ACTION_SIZE
@@ -122,7 +132,22 @@ def collect_trajectory(
         new_env_states = new_env_states.replace(
             exp_filtered_reward_rate=new_reward_rate,
         )
-        
+
+        # Optional hidden-state intervention at odor-site exits (testing only).
+        # Fires when obs[1:4] transitions high→low while obs[0] stays high.
+        if intervention_fn is not None:
+            _threshold = 0.5
+            prev_in_odor  = jnp.any(train_state.prev_obs[..., 1:4] > _threshold, axis=-1)
+            curr_in_odor  = jnp.any(new_obs[..., 1:4] > _threshold, axis=-1)
+            still_in_patch = new_obs[..., 0] > _threshold
+            exiting_odor  = ~prev_in_odor & curr_in_odor & still_in_patch & (infos['reward_site_idx'] > 0)  # (num_envs,)
+            jax.debug.print('exiting_odor, {x}', x=exiting_odor)
+            new_actor_hidden = jnp.where(
+                exiting_odor[..., None],
+                intervention_fn(new_actor_hidden),
+                new_actor_hidden,
+            )
+
         # Update train state with new info
         new_train_state = train_state.replace(
             rng_key=rng_key,

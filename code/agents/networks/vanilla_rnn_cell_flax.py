@@ -7,19 +7,20 @@ class VanillaRNNCell(nn.Module):
     """Vanilla RNN cell with custom initializers"""
     hidden_size: int
     unit_noise_std: float = 0
-    
+    init_scale: float = 1.0
+
     def setup(self):
         # Input projection with default initializers
         self.input_projection = nn.Dense(
-            self.hidden_size, 
+            self.hidden_size,
             use_bias=False,
         )
-        
+
         # Hidden projection with custom initializers
         self.hidden_projection = nn.Dense(
-            self.hidden_size, 
+            self.hidden_size,
             use_bias=True,
-            kernel_init=nn.initializers.orthogonal(scale=1.0),
+            kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
         )
         
     def __call__(self, hidden, x):

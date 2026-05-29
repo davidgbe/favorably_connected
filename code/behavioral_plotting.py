@@ -232,8 +232,8 @@ def plot_session(data_path, session_idx, xlim=None, max_reward_param=30,
         fig.savefig(os.path.join(save_dir, 'behavioral_stops_stats_reward_counts.png'))
 
 
-def load_odor_site_df(load_path, nn_num=0):
-    all_session_data = get_all_session_summaries_pkl(load_path)
+def load_odor_site_df(load_path, nn_num=0, lim=None, brief=False):
+    all_session_data = get_all_session_summaries_pkl(load_path, lim=lim, brief=brief)
     odor_site_dfs = []
     for i_ss, ss in enumerate(all_session_data):
         odor_sites_for_session = []
@@ -263,7 +263,7 @@ def plot_patch_statistics_by_session(df, max_reward_param=40, fixed_colors=False
                 (df['session_number'] == session_num)
                 & (df['patch_reward_param'] == tau)
             )
-            mean_count = df[crit].groupby('patch_number').count()['rewarded'].mean()
+            mean_count = df[crit].groupby('patch_number')['rewards_seen_in_patch'].max().mean()
             session_data.append({
                 'session_number': session_num,
                 'tau': tau,

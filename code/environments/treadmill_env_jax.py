@@ -321,6 +321,7 @@ def TreadmillEnvironment():
                 patch_state = generate_patch(patch_num, new_patch_start, s.reward_params, params.reward_prob_prefactors)
                 patch_state = generate_new_reward_site(subkey2, patch_state, params, True)
 
+
                 return s.replace(
                     dwell_time=0,
                     current_reward_site_attempted=False,

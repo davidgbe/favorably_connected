@@ -351,6 +351,7 @@ class TrainingConfig:
     gamma: float = 0.999 # 0.987
     learning_rate: float = 2.5e-5 # 1e-4
     rnn_type: str = 'GRU'
+    init_scale: float = 1.0
 
     # Training params (runtime configurable)
     seed: int = 0
@@ -483,6 +484,7 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
         interreward_len_decay_rate=config.interreward_len_decay_rate,
         interpatch_len_bounds=config.interpatch_len_bounds,
         interpatch_len_decay_rate=config.interpatch_len_decay_rate,
+        dwell_time_for_reward=config.dwell_time_for_reward,
     )
 
     net_init_key, rng_key = random.split(rng_key)
@@ -494,8 +496,9 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
         rnn_type=config.rnn_type,
         unit_noise_std=config.unit_noise_std,
         rng_key=net_init_key,
+        init_scale=config.init_scale,
     )
-    
+
     # Create training state
     train_state = create_train_state(
         rng_key=rng_key,
@@ -540,6 +543,8 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
     save_dir_rewards = save_dir / '_reward_rates'
     save_dir_rewards.mkdir(parents=True, exist_ok=True)
     
+    best_session_reward = -np.inf
+
     # Training loop (outer loop stays in Python for logging)
     for session_num in trange(config.n_sessions, desc='Sessions'):
         
@@ -600,16 +605,15 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
         
         print(f'Session {session_num}: Avg reward = {session_mean_reward:.4f}')
         
-        # Periodic saving (matching your original save rate)
-        if session_num % config.output_state_save_rate == 0:
-            print(f"Save checkpoint at session {session_num}")
-            save_dir = Path(f"checkpoints/{config.exp_name}").resolve()  # makes it absolute
+        if session_mean_reward > best_session_reward:
+            best_session_reward = session_mean_reward
+            print(f"New best reward {best_session_reward:.4f} at session {session_num} — saving checkpoint")
             checkpoints.save_checkpoint(
                 ckpt_dir=str(save_dir),
-                target={"params": train_state.params},  # or just train_state
-                step=session_num,
-                overwrite=True, # allows overwriting instead of accumulating
-                keep=100,
+                target={"params": train_state.params},
+                step=0,
+                overwrite=True,
+                keep=1,
             )
 
         sn = zero_pad(session_num, 6)
@@ -620,7 +624,8 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
     return train_state, all_session_rewards
 
 
-def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajectories: bool = False):
+def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajectories: bool = False,
+                     intervention_points_path: str = None):
     """Evaluate trained A2C agent without gradient updates"""
     
     print("Starting JAX A2C Evaluation...")
@@ -641,6 +646,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
         interreward_len_decay_rate=config.interreward_len_decay_rate,
         interpatch_len_bounds=config.interpatch_len_bounds,
         interpatch_len_decay_rate=config.interpatch_len_decay_rate,
+        reward_site_len=config.reward_site_len,
     )
 
     session_steps = N_UPDATES_PER_SESSION * N_STEPS_PER_UPDATE
@@ -654,8 +660,9 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
         rnn_type=config.rnn_type,
         unit_noise_std=config.unit_noise_std,
         rng_key=net_init_key,
+        init_scale=config.init_scale,
     )
-    
+
     # Create training state (just for structure, won't be updated)
     train_state = create_train_state(
         rng_key=rng_key,
@@ -679,10 +686,34 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
     # Initialize environment
     reset_fn, step_fn, get_obs_fn = TreadmillEnvironment()
     
+    # Build intervention closure if a points file was provided
+    intervention_fn = None
+    if intervention_points_path is not None:
+        with open(intervention_points_path, 'rb') as f:
+            _points = jnp.array(pickle.load(f))   # (N, H)
+        print(f"Loaded intervention points: shape {_points.shape} from {intervention_points_path}")
+        def intervention_fn(actor_hidden, _pts=_points, r=0.01):
+            diffs = actor_hidden[:, None, :] - _pts[None, :, :]   # (num_envs, N, H)
+            dists = jnp.sum(diffs ** 2, axis=-1)                   # (num_envs, N)
+            nearest = jnp.argmin(dists, axis=-1)                   # (num_envs,)
+            nearest_dist = jnp.sqrt(jnp.min(dists, axis=-1))
+            # jax.debug.print('Nearest fixed point dist {x}', x=nearest_sq_dist)
+            new_hidden = jnp.where(
+                nearest_dist > 1e-8,
+                jnp.where(
+                    nearest_dist < r,
+                    actor_hidden,
+                    _pts[nearest] + r * (actor_hidden - _pts[nearest]) / nearest_dist,
+                ),
+                _pts[nearest],
+            )
+            # pert = jnp.where(nearest_dist < r, 0, pert)
+            return new_hidden # (num_envs, H)
+
     # Storage for results
     all_episode_rewards = []
     all_trajectories = [] if save_trajectories else None
-    
+
     # Run evaluation episodes
     for episode in trange(config.n_sessions, desc='Sessions'):
 
@@ -712,6 +743,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
             hidden_size=config.hidden_size,
             obs_size=config.obs_size,
             n_steps=session_steps,
+            intervention_fn=intervention_fn,
         )
         
         # Extract episode metrics
@@ -841,6 +873,7 @@ def main():
     parser.add_argument('--test_sessions', type=int, default=30, help='Number of episodes to run in test mode')
     parser.add_argument('--save_trajectories', action='store_true', help='Save trajectory data during testing')
     parser.add_argument('--n_networks', type=int, default=1, help='Number of sequential networks to train (default: 1)')
+    parser.add_argument('--intervention_points', type=str, default=None, help='Path to .pkl file containing (N, H) array of points for nearest-neighbour hidden-state intervention (test mode only)')
     args = parser.parse_args()
 
     """Entry point for training or evaluation"""
@@ -853,6 +886,9 @@ def main():
         # Update exp_name with timestamp if not set in config
         if not config.exp_name or config.exp_name == '':
             config = config.replace(exp_name=f"json_config_{time_stamp}")
+        if args.exp_title and args.exp_title != '':
+            exp_name = f'{args.exp_title}_seed_{config.seed}_{time_stamp}'
+            config = config.replace(exp_name=exp_name)
     else:
         # Build config from command-line arguments (original behavior)
         exp_name = f'{args.exp_title}_seed_{args.seed}_{time_stamp}'
@@ -904,10 +940,16 @@ def main():
         print("Running in TEST mode")
         print(config)
 
+        config = config.replace(
+            n_sessions=30,
+            num_envs=1,
+        )
+
         results, trajectories = evaluate_a2c_jax(
             config=config,
             checkpoint_path=os.path.join(os.getcwd(), args.checkpoint_path),
-            save_trajectories=args.save_trajectories
+            save_trajectories=args.save_trajectories,
+            intervention_points_path=args.intervention_points,
         )
 
         print(f"\nTest completed! Mean reward: {results['mean_reward_rate']:.4f}")

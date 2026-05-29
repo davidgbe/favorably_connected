@@ -7,3 +7,4 @@ results/**/*
 data/**/*
 checkpoints/**/*
 figures/**/*
+saved_states/**/*

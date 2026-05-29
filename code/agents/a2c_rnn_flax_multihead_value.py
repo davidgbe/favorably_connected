@@ -9,19 +9,20 @@ class A2CRNNFlax(nn.Module):
     hidden_size: int
     rnn_type: str = 'GRU'  # 'VANILLA' or 'GRU'
     var_noise: float = 1e-4
-    
+    init_scale: float = 1.0
+
     def setup(self):
         if self.rnn_type == 'VANILLA':
-            self.rnn_actor = VanillaRNNCell(self.hidden_size, self.var_noise)
-            self.rnn_critic = VanillaRNNCell(self.hidden_size, self.var_noise)
+            self.rnn_actor = VanillaRNNCell(self.hidden_size, self.var_noise, self.init_scale)
+            self.rnn_critic = VanillaRNNCell(self.hidden_size, self.var_noise, self.init_scale)
         elif self.rnn_type == 'GRU':
             self.rnn_actor = nn.GRUCell(
                 features=self.hidden_size,
-                kernel_init=nn.initializers.orthogonal(),
+                kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
             )
             self.rnn_critic = nn.GRUCell(
                 features=self.hidden_size,
-                kernel_init=nn.initializers.orthogonal(),
+                kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
             )
         else:
             raise ValueError(f"Unknown RNN type: {self.rnn_type}")
@@ -66,6 +67,7 @@ def init_network_and_params(
     rnn_type: str,
     var_noise: float,
     rng_key: jnp.ndarray,
+    init_scale: float = 1.0,
 ):
     # Network input size: obs + prev_obs + prev_action + prev_reward
     input_size = obs_size + action_size + 1
@@ -73,9 +75,10 @@ def init_network_and_params(
     # Initialize network
     network = A2CRNNFlax(
         action_size=action_size,
-        hidden_size=hidden_size, 
+        hidden_size=hidden_size,
         rnn_type=rnn_type,
         var_noise=var_noise,
+        init_scale=init_scale,
     )
     
     # Initialize parameters
