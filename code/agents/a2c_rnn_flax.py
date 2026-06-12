@@ -29,15 +29,33 @@ class A2CRNNFlax(nn.Module):
             raise ValueError(f"Unknown RNN type: {self.rnn_type}")
             
         # Actor and critic heads
-        self.actor = nn.Dense(self.action_size)
-        self.critic = nn.Dense(1)
-        self.env_quality_prediction = nn.Dense(3) # for 3 environment parameters
-        self.exp_filtered_reward_rate_prediction = nn.Dense(1) # for 3 environment parameters
+        self.actor = nn.Dense(
+            self.action_size,
+            kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
+        )
+        self.critic = nn.Dense(
+            1,
+            kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
+        )
+        self.env_quality_prediction = nn.Dense(
+            3,
+            kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
+        )  # for 3 environment parameters
+        self.exp_filtered_reward_rate_prediction = nn.Dense(
+            1,
+            kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
+        )  # for 3 environment parameters
 
         self.obs_pred_hidden_size = 16
-        self.obs_pred_layer_1 = nn.Dense(self.obs_pred_hidden_size)
-        self.obs_prediction = nn.Dense(self.obs_size + 1)
-        
+        self.obs_pred_layer_1 = nn.Dense(
+            self.obs_pred_hidden_size,
+            kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
+        )
+        self.obs_prediction = nn.Dense(
+            self.obs_size + 1,
+            kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
+        )
+
     def __call__(self, x, actor_hidden, critic_hidden):
         """
         Args:
@@ -90,7 +108,9 @@ def init_network_and_params(
     init_scale: float = 1.0,
 ):
     # Network input size: obs + prev_obs + prev_action + prev_reward
-    input_size = obs_size + action_size + 1
+    # input_size = obs_size + action_size + 1 + 1 # +1 for previous reward, +1 for exp filtered reward rate
+    input_size = obs_size + action_size + 1 # +1 for previous reward, +1 for exp filtered reward rate
+
 
     # Initialize network
     network = A2CRNNFlax(

@@ -86,14 +86,18 @@ def parse_behavioral_data(d, env_idx=None):
         for f in features:
             try:
                 features_to_time_series_dict[f] = np.array(features_to_time_series_dict[f])
-            except e:
+            except Exception as e:
                 print(e)
 
         n_steps = len(d)
     else:
+        d = {f: np.asarray(v) for f, v in d.items()}
+        # If observations is 3-D the dict still has a leading batch dimension;
+        # collapse it using env_idx (default 0).
+        if d['observations'].ndim == 3:
+            batch_idx = env_idx if env_idx is not None else 0
+            d = {f: v[batch_idx] for f, v in d.items()}
         features_to_time_series_dict = d
-        for f in d.keys():
-            d[f] = np.asarray(d[f])
         n_steps = d['observations'].shape[0]
 
     features_to_time_series_dict['current_patch_num'] = features_to_time_series_dict['current_patch_num'].astype(int)
@@ -217,6 +221,9 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
         reward_attempted_at_positions = b_data['reward_attempted_at_positions']
         all_patch_nums = b_data['current_patch_num']
         all_patch_reward_params = b_data['patch_reward_param']
+        all_patch_reward_prob_prefactors = None
+        if 'patch_reward_prob_prefactor' in b_data:
+            all_patch_reward_prob_prefactors = b_data['patch_reward_prob_prefactor']
         rewards_seen_in_patch = b_data['rewards_seen_in_patch']
 
         ss = {
@@ -228,7 +235,8 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
             'acc_reward_stops_for_patch_type': np.zeros((all_patch_nums.max() + 1, max_acc_reward)),
             'acc_reward_stop_opportunities_for_patch_type': np.zeros((all_patch_nums.max() + 1, max_acc_reward)),
             'patches_entered_for_patch_type': np.zeros((all_patch_nums.max() + 1,)),
-            'reward_param_for_patch_type': np.zeros((all_patch_nums.max() + 1,))
+            'reward_param_for_patch_type': np.zeros((all_patch_nums.max() + 1,)),
+            'reward_prob_prefactor_for_patch_type': np.zeros((all_patch_nums.max() + 1,))
         }
 
         last_pstart = None
@@ -239,6 +247,7 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
         rw_site_counter = 0
         pt = None
         global_reward_rate_param = np.sum(np.unique(all_patch_reward_params))
+        interpatch_distance = np.nan
 
         for i, pstart in enumerate(b_data['current_patch_start']):
 
@@ -246,18 +255,24 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
                 pt = all_patch_nums[i]
                 ss['patches_entered_for_patch_type'][pt] += 1
                 ss['reward_param_for_patch_type'][pt] = all_patch_reward_params[i]
-                patch_count += 1
+                if all_patch_reward_prob_prefactors is not None:
+                    ss['reward_prob_prefactor_for_patch_type'][pt] = all_patch_reward_prob_prefactors[i]
+                patch_count += 1                    # 'interpatch_distance': [int(pstart - last_pstart) if last_pstart is not None else np.nan],
+
                 rw_site_counter = 0
                 if len(hist_odor_site_data) > 0 and hist_odor_site_data[-1]['added'][0] == 0:
                     hist_odor_site_data[-1]['added'] = [1]
                     ss['all_odor_site_data'].append(hist_odor_site_data[-1])
                     hist_odor_site_data = []
+                if last_pstart is not None:
+                    interpatch_distance = int(pstart - last_reward_site_end) if last_pstart is not None else np.nan
 
             rwsb = copy(b_data['reward_bounds'][i])
             reward_site_start = int(rwsb[0])
 
             if last_reward_site_start is None or not np.isclose(last_reward_site_start, reward_site_start):
-                odor_site_data = pd.DataFrame({
+                odor_site_data = {
+                    'interpatch_distance': [interpatch_distance],
                     'dist_last_odor_site': [np.nan],
                     'patch_reward_param': [all_patch_reward_params[i]],
                     'index': [rw_site_counter],
@@ -270,7 +285,12 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
                     'patch_number': [patch_count],
                     'session_number': [session_number],
                     'patch_type': [pt],
-                })
+                }
+
+                if all_patch_reward_prob_prefactors is not None:
+                    odor_site_data['patch_reward_prob_prefactor'] = [all_patch_reward_prob_prefactors[i]]
+
+                odor_site_data = pd.DataFrame(odor_site_data)
 
                 if rewards_seen_in_patch[i] < max_acc_reward:
                     ss['acc_reward_stop_opportunities_for_patch_type'][pt, int(rewards_seen_in_patch[i])] += 1
@@ -385,15 +405,11 @@ def load_trajectory_data(filepath: str) -> Tuple[List[Dict], Dict]:
     
     with open(filepath, 'rb') as f:
         trajectories = pickle.load(f)
-        
-    # Extract metadata from first trajectory
-    if trajectories:
-        sample_traj = trajectories[0]
-        # print(f"Episode length: {len(sample_traj['observations'])}")
-        # print(f"Observation shape: {sample_traj['observations'].shape}")
-        # print(f"Action shape: {sample_traj['actions'].shape}")
-        # print(f"Sample episode reward: {sample_traj['episode_reward']:.4f}")
-    
+
+    # Normalise: a bare dict (single saved trajectory) becomes a one-element list
+    if isinstance(trajectories, dict):
+        trajectories = [trajectories]
+
     return trajectories
 
 

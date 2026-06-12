@@ -71,8 +71,10 @@ def collect_trajectory(
     
     reset_fn, step_fn, get_obs_fn = TreadmillEnvironment()
     
+    step_num = jnp.zeros_like(env_states.exp_filtered_reward_rate)  # (num_envs,)
+
     def scan_step(carry, _):
-        train_state, env_states = carry
+        train_state, env_states, step_num = carry
         rng_key = train_state.rng_key
         
         # Sample actions using current observations (from previous step)
@@ -117,8 +119,9 @@ def collect_trajectory(
         # Unpack step results
         new_obs, new_env_states, rewards, dones, infos = step_results
 
-        alpha = 0.9997
-        new_reward_rate = alpha * new_env_states.exp_filtered_reward_rate + (1.0 - alpha) * rewards
+        new_step_num = step_num + 1
+        new_reward_rate = (new_env_states.exp_filtered_reward_rate
+                           + (rewards - new_env_states.exp_filtered_reward_rate) / new_step_num)
 
         new_env_states = new_env_states.replace(
             exp_filtered_reward_rate=new_reward_rate,
@@ -128,15 +131,12 @@ def collect_trajectory(
         # Fires when obs[1:4] transitions high→low while obs[0] stays high.
         if intervention_fn is not None:
             _threshold = 0.5
-            prev_in_odor   = jnp.any(train_state.prev_obs[..., 1:4] > _threshold, axis=-1)
-            curr_in_odor   = jnp.any(new_obs[..., 1:4] > _threshold, axis=-1)
+            prev_in_odor = jnp.any(train_state.prev_obs[..., 1:4] > _threshold, axis=-1)
+            curr_in_odor = jnp.any(new_obs[..., 1:4] > _threshold, axis=-1)
             still_in_patch = new_obs[..., 0] > _threshold
-            exiting_odor   = prev_in_odor & ~curr_in_odor & still_in_patch \
+            exiting_odor = prev_in_odor & ~curr_in_odor & still_in_patch \
                 & ((infos['reward_bounds'][:, 0] - infos['current_position']) <= 1.) # (num_envs,)
-            # jax.debug.print('{x}, {y}', x=infos['reward_bounds'][:, 0], y=infos['current_position'])
-            # jax.debug.print('{x}', x=infos['reward_bounds'][:, 0] - infos['current_position'])
-            # jax.debug.print('{x}', x=exiting_odor)
-            # jax.debug.print('{x}', x=(infos['reward_bounds'][:, 0] - infos['current_position'])[exiting_odor])
+
             new_actor_hidden = jnp.where(
                 exiting_odor[..., None],
                 intervention_fn(new_actor_hidden),
@@ -169,12 +169,12 @@ def collect_trajectory(
             'pred_reward_rate': pred_reward_rate,
         } | infos
         
-        return (new_train_state, new_env_states), step_data
-    
+        return (new_train_state, new_env_states, new_step_num), step_data
+
     # Run scan over time steps using compile-time constant
-    (final_train_state, final_env_states), trajectory_data = lax.scan(
+    (final_train_state, final_env_states, _), trajectory_data = lax.scan(
         scan_step,
-        (train_state, env_states),
+        (train_state, env_states, step_num),
         None,
         length=n_steps  # Now a compile-time constant
     )

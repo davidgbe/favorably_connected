@@ -27,6 +27,7 @@ class TrajectoryData:
     reward_site_idx: jnp.ndarray
     current_reward_site_attempted: jnp.ndarray
     patch_reward_param: jnp.ndarray
+    patch_reward_prob_prefactor: jnp.ndarray
     reward: jnp.ndarray
 
     observations: jnp.ndarray  # (num_envs, n_steps, obs_size)
@@ -59,16 +60,7 @@ def collect_trajectory(
     n_steps: int,
     intervention_fn=None,
 ) -> Tuple[TrajectoryData, TrainState, TreadmillEnvState]:
-    """Collect trajectory using lax.scan over time steps.
-
-    intervention_fn: callable or None.
-        If provided, called as intervention_fn(actor_hidden) -> actor_hidden at every
-        timestep where the agent is exiting an odor site while still in the patch
-        (obs[1:4] transitions from high to low, obs[0] stays high).  The returned
-        hidden state is used only for environments where the condition fires; others
-        are left unchanged via jnp.where.
-        Pass None (default) during training so no intervention code is traced.
-    """
+    """Collect trajectory using lax.scan over time steps"""
     
     network = A2CRNNFlax(
         action_size=2,  # Fixed ACTION_SIZE
@@ -80,8 +72,10 @@ def collect_trajectory(
     
     reset_fn, step_fn, get_obs_fn = TreadmillEnvironment()
     
+    step_num = jnp.zeros_like(env_states.exp_filtered_reward_rate)  # (num_envs,)
+
     def scan_step(carry, _):
-        train_state, env_states = carry
+        train_state, env_states, step_num = carry
         rng_key = train_state.rng_key
         
         # Sample actions using current observations (from previous step)
@@ -91,6 +85,7 @@ def collect_trajectory(
             train_state.prev_obs,                    # Current observations  
             prev_action_one_hot,  # Previous action as scalar
             train_state.prev_reward[..., None],      # Previous reward
+            # env_states.exp_filtered_reward_rate[..., None] / 0.005,  # Exponentially filtered reward rate
         ], axis=-1)
         
         # Add input noise
@@ -103,7 +98,7 @@ def collect_trajectory(
         # Forward pass through network
         logits, values, new_actor_hidden, new_critic_hidden, pred_env_quality, pred_obs, pred_reward_rate = network.apply(
             train_state.params,
-            network_input,
+            jax.lax.stop_gradient(network_input),
             train_state.actor_hidden,
             train_state.critic_hidden,
             rngs={'noise': network_noise_key} if train_state.params  else {}  # Simple check
@@ -126,8 +121,9 @@ def collect_trajectory(
         # Unpack step results
         new_obs, new_env_states, rewards, dones, infos = step_results
 
-        alpha = 0.9997
-        new_reward_rate = alpha * new_env_states.exp_filtered_reward_rate + (1.0 - alpha) * rewards
+        new_step_num = step_num + 1
+        new_reward_rate = (new_env_states.exp_filtered_reward_rate
+                           + (rewards - new_env_states.exp_filtered_reward_rate) / new_step_num)
 
         new_env_states = new_env_states.replace(
             exp_filtered_reward_rate=new_reward_rate,
@@ -137,11 +133,11 @@ def collect_trajectory(
         # Fires when obs[1:4] transitions high→low while obs[0] stays high.
         if intervention_fn is not None:
             _threshold = 0.5
-            prev_in_odor  = jnp.any(train_state.prev_obs[..., 1:4] > _threshold, axis=-1)
-            curr_in_odor  = jnp.any(new_obs[..., 1:4] > _threshold, axis=-1)
+            prev_in_odor = jnp.any(train_state.prev_obs[..., 1:4] > _threshold, axis=-1)
+            curr_in_odor = jnp.any(new_obs[..., 1:4] > _threshold, axis=-1)
             still_in_patch = new_obs[..., 0] > _threshold
-            exiting_odor  = ~prev_in_odor & curr_in_odor & still_in_patch & (infos['reward_site_idx'] > 0)  # (num_envs,)
-            jax.debug.print('exiting_odor, {x}', x=exiting_odor)
+            exiting_odor = prev_in_odor & ~curr_in_odor & still_in_patch \
+                & ((infos['reward_bounds'][:, 0] - infos['current_position']) <= 1.) # (num_envs,)
             new_actor_hidden = jnp.where(
                 exiting_odor[..., None],
                 intervention_fn(new_actor_hidden),
@@ -160,9 +156,9 @@ def collect_trajectory(
         
         # Return step data (using the observations that were actually used for decisions)
         step_data = {
-            'observations': train_state.prev_obs,  # The obs that led to these actions
+            'observations': network_input,  # The obs that led to these actions
             'actions': actions,
-            'rewards': rewards, 
+            'rewards': rewards,
             'logits': logits,
             'values': values,
             'dones': dones,
@@ -174,12 +170,12 @@ def collect_trajectory(
             'pred_reward_rate': pred_reward_rate,
         } | infos
         
-        return (new_train_state, new_env_states), step_data
-    
+        return (new_train_state, new_env_states, new_step_num), step_data
+
     # Run scan over time steps using compile-time constant
-    (final_train_state, final_env_states), trajectory_data = lax.scan(
+    (final_train_state, final_env_states, _), trajectory_data = lax.scan(
         scan_step,
-        (train_state, env_states),
+        (train_state, env_states, step_num),
         None,
         length=n_steps  # Now a compile-time constant
     )

@@ -20,6 +20,7 @@ from matplotlib.colors import Normalize, TwoSlopeNorm
 from matplotlib.collections import LineCollection
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from matplotlib.cm import ScalarMappable
+import matplotlib.patches as mpatches
 from matplotlib.patches import Rectangle
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
@@ -38,6 +39,29 @@ A fixed point h* satisfies: h* = f(h*, x) for a given input x.
 
 from typing import List, Tuple
 from agents.a2c_rnn_flax import init_network_and_params
+
+
+def filter_traj_data(traj_data, mask):
+    """
+    Return a copy of traj_data with every array whose first axis matches
+    len(mask) filtered by mask.  Arrays with a different first dimension
+    (e.g. unique_patch_reward_params) are passed through unchanged.
+
+    Example
+    -------
+    mask = traj_data['pred_reward_rate'][:, 0] < 0.05
+    td_low = filter_traj_data(traj_data, mask)
+    """
+    mask = np.asarray(mask).ravel().astype(bool)
+    n    = len(mask)
+    out  = {}
+    for k, v in traj_data.items():
+        v = np.asarray(v)
+        if v.ndim >= 1 and v.shape[0] == n:
+            out[k] = v[mask]
+        else:
+            out[k] = v
+    return out
 
 
 def rnn_step(hidden_state, input_vec, params, network):
@@ -734,22 +758,39 @@ def plot_eigenvalue_real_histograms(
 
 
 # --- (from cell d2c62890-3169-4c28-b90a-6f62b24c079c) ---
-def _style_3d_ax(ax, norm, cmap, label, cbar=True):
-    """Shared 3-D axis styling: no box, arrow axes, colorbar."""
+def _style_3d_ax(ax, norm, cmap, label, cbar=True, autoscale=True, rotation=None):
+    """Shared 3-D axis styling: no box, arrow axes, colorbar.
+
+    rotation : (3, 3) array or None.  When provided (same R used to rotate data),
+               the PC axis arrows are drawn along R's columns so they rotate with
+               the data rather than staying fixed to the matplotlib coordinate frame.
+    """
     ax.set_axis_off()
-    ax.autoscale_view()
+    if autoscale:
+        ax.autoscale_view()
     xlim, ylim, zlim = ax.get_xlim(), ax.get_ylim(), ax.get_zlim()
     ox, oy, oz = xlim[0], ylim[0], zlim[0]
     xl = (xlim[1] - xlim[0]) * 0.45
     yl = (ylim[1] - ylim[0]) * 0.45
     zl = (zlim[1] - zlim[0]) * 0.45
     kw = dict(color='k', arrow_length_ratio=0.08, linewidth=1)
-    ax.quiver(ox, oy, oz, xl, 0,  0,  **kw)
-    ax.quiver(ox, oy, oz, 0,  yl, 0,  **kw)
-    ax.quiver(ox, oy, oz, 0,  0,  zl, **kw)
-    ax.text(ox + xl * 1.12, oy,             oz,             'PC 1', ha='center', va='center')
-    ax.text(ox,             oy + yl * 1.12, oz,             'PC 2', ha='center', va='center')
-    ax.text(ox,             oy,             oz + zl * 1.12, 'PC 3', ha='center', va='center')
+
+    if rotation is not None:
+        # PC axis directions in display space are the columns of R
+        d1 = rotation[:, 0] * xl
+        d2 = rotation[:, 1] * yl
+        d3 = rotation[:, 2] * zl
+    else:
+        d1 = np.array([xl, 0,  0 ])
+        d2 = np.array([0,  yl, 0 ])
+        d3 = np.array([0,  0,  zl])
+
+    ax.quiver(ox, oy, oz, *d1, **kw)
+    ax.quiver(ox, oy, oz, *d2, **kw)
+    ax.quiver(ox, oy, oz, *d3, **kw)
+    ax.text(ox + d1[0]*1.12, oy + d1[1]*1.12, oz + d1[2]*1.12, 'PC 1', ha='center', va='center')
+    ax.text(ox + d2[0]*1.12, oy + d2[1]*1.12, oz + d2[2]*1.12, 'PC 2', ha='center', va='center')
+    ax.text(ox + d3[0]*1.12, oy + d3[1]*1.12, oz + d3[2]*1.12, 'PC 3', ha='center', va='center')
     if cbar:
         cb = plt.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax,
                           label=label, shrink=0.35, aspect=15)
@@ -917,45 +958,129 @@ def extract_patch_starts_and_stops(agent_in_patch):
 
 
 # --- (from cell add-separatrix-plane) ---
-def add_separatrix_plane(ax, params, pca, n_pts=500, alpha=0.2, color='steelblue'):
+def _separatrix_view_angles(params, pca):
+    """Return (elev, azim) to view the separatrix plane edge-on with its normal horizontal.
+
+    The z-component of the PC-space normal is zeroed so the normal lies in the
+    horizontal plane of the plot.  The camera azimuth is then rotated 90° from
+    the normal direction so the line of sight is perpendicular to the normal
+    (edge-on view), making the normal appear as a horizontal line in the frame.
+    """
+    kernel  = np.array(params['params']['actor']['kernel'])
+    bias    = np.array(params['params']['actor']['bias'])
+    w       = kernel[:, 0] - kernel[:, 1]
+    n_pc    = w @ pca.components_[:3].T   # normal in 3D PC space
+
+    # Force the normal to be horizontal by zeroing its z-component
+    n_horiz    = n_pc.copy()
+    n_horiz[2] = 0.0
+    if np.linalg.norm(n_horiz) < 1e-8:
+        return 20, 30  # normal is nearly vertical — fall back to defaults
+    n_horiz /= np.linalg.norm(n_horiz)
+
+    # Set azimuth equal to the normal's horizontal angle so the camera sits
+    # perpendicular to the normal (edge-on view, plane appears as a line).
+    phi  = float(np.degrees(np.arctan2(n_horiz[1], n_horiz[0])))
+    azim = phi
+    elev = 0.0
+    return elev, azim
+
+
+def _build_rotation_matrix(rx=0.0, ry=0.0, rz=0.0):
+    """Build rotation matrix Rz @ Ry @ Rx from Euler angles (degrees) about PC axes."""
+    cx, sx = np.cos(np.radians(rx)), np.sin(np.radians(rx))
+    cy, sy = np.cos(np.radians(ry)), np.sin(np.radians(ry))
+    cz, sz = np.cos(np.radians(rz)), np.sin(np.radians(rz))
+    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
+    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+    return Rz @ Ry @ Rx
+
+
+def _rotate_view(elev_base, azim_base, rx=0.0, ry=0.0, rz=0.0):
+    """Apply Euler rotations (degrees) about x/y/z axes to a base (elev, azim) camera direction.
+
+    Returns the new (elev, azim) after rotating the camera position unit vector by
+    Rz(rz) @ Ry(ry) @ Rx(rx).
+    """
+    e = np.radians(elev_base)
+    a = np.radians(azim_base)
+    d = np.array([np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
+
+    def Rx(t):
+        c, s = np.cos(np.radians(t)), np.sin(np.radians(t))
+        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+    def Ry(t):
+        c, s = np.cos(np.radians(t)), np.sin(np.radians(t))
+        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    def Rz(t):
+        c, s = np.cos(np.radians(t)), np.sin(np.radians(t))
+        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])
+
+    d_new = Rz(rz) @ Ry(ry) @ Rx(rx) @ d
+    elev_new = float(np.degrees(np.arcsin(np.clip(d_new[2], -1.0, 1.0))))
+    azim_new = float(np.degrees(np.arctan2(d_new[1], d_new[0])))
+    return elev_new, azim_new
+
+
+def add_separatrix_plane(ax, params, pca, n_pts=60, alpha=0.2, color='steelblue',
+                          rotation=None):
     """Overlay the action decision-boundary plane onto a 3D PC-space axis.
 
     The separatrix is the hyperplane in hidden space where the two action logits
     are equal: (kernel[:,0] - kernel[:,1]) · h + (bias[0] - bias[1]) = 0.
     It is projected into the first 3 PCs and drawn as a surface.
+
+    rotation : (3, 3) array or None.  If provided, the plane mesh is rotated by
+               this matrix (same R used to rotate trajectory data) before plotting.
     """
-    kernel = np.array(params['params']['actor']['kernel'])  # (hidden, 2)
-    bias   = np.array(params['params']['actor']['bias'])    # (2,)
-
-    # Decision-boundary normal in hidden space: w·h + b_diff = 0
-    w      = kernel[:, 0] - kernel[:, 1]   # (hidden,)
+    kernel = np.array(params['params']['actor']['kernel'])
+    bias   = np.array(params['params']['actor']['bias'])
+    w      = kernel[:, 0] - kernel[:, 1]
     b_diff = float(bias[0] - bias[1])
+    n_pc   = w @ pca.components_[:3].T          # (3,) normal in PC space
+    d      = -(np.dot(w, pca.mean_) + b_diff)   # offset
 
-    # Project to 3D PC space: n_pc · z = d
-    n_pc = w @ pca.components_[:3].T          # (3,)
-    d    = -(np.dot(w, pca.mean_) + b_diff)
+    # Two orthogonal vectors spanning the plane (avoids divide-by-small-z issues)
+    n_hat = n_pc / np.linalg.norm(n_pc)
+    ref   = np.array([1.0, 0.0, 0.0]) if abs(n_hat[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = np.cross(n_hat, ref);  u /= np.linalg.norm(u)
+    v = np.cross(n_hat, u)
+    # Point on plane closest to origin
+    z0 = n_hat * (d / np.linalg.norm(n_pc))
 
-    xlim = ax.get_xlim()
-    ylim = ax.get_ylim()
-    xx, yy = np.meshgrid(np.linspace(*xlim, n_pts), np.linspace(*ylim, n_pts))
+    # Grid extent: unrotate current axis corners to original PC space to find range
+    xlim = ax.get_xlim();  ylim = ax.get_ylim();  zlim = ax.get_zlim()
+    corners = np.array([[x, y, z] for x in xlim for y in ylim for z in zlim])
+    if rotation is not None:
+        orig_corners = corners @ rotation   # R^{-1} = R^T, row-vector form: x_orig = x_rot @ R
+        grid_range   = float(np.abs(orig_corners).max()) * 1.2
+    else:
+        grid_range = max(xlim[1] - xlim[0], ylim[1] - ylim[0], zlim[1] - zlim[0]) * 0.6
 
-    if np.abs(n_pc[2]) < 1e-8:
-        return  # plane nearly vertical in z — skip
+    s = np.linspace(-grid_range, grid_range, n_pts)
+    ss, tt = np.meshgrid(s, s)
+    pts = z0 + ss[..., None] * u + tt[..., None] * v   # (n_pts, n_pts, 3) in PC space
 
-    zz = (d - n_pc[0] * xx - n_pc[1] * yy) / n_pc[2]
-    
-    def filter_z(z, max):
-        z = np.where(np.abs(z) > max, np.nan, z)
-        return z
+    if rotation is not None:
+        pts = pts @ rotation.T   # rotate to display space (row-vector form: x_rot = x @ R.T)
 
-    zz = filter_z(zz, np.abs(np.array(ax.get_zlim())).max())
+    # Mask points outside current axis limits (already in display space)
+    mask = (
+        (pts[..., 0] < xlim[0]) | (pts[..., 0] > xlim[1]) |
+        (pts[..., 1] < ylim[0]) | (pts[..., 1] > ylim[1]) |
+        (pts[..., 2] < zlim[0]) | (pts[..., 2] > zlim[1])
+    )
+    xx = np.where(mask, np.nan, pts[..., 0])
+    yy = np.where(mask, np.nan, pts[..., 1])
+    zz = np.where(mask, np.nan, pts[..., 2])
 
     ax.plot_surface(xx, yy, zz, alpha=alpha, color=color, shade=False, zorder=0)
 
 
 # --- (from cell 603947a4-78ec-4e47-8215-9cd37f44d61f) ---
 def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_trajectories=None,
-                                color_by='time', params=None, pca=None, elev=20, azim=30):
+                                color_by='time', params=None, pca=None, rx=0, ry=0, rz=0):
     """
     Three 3-D PC plots of hidden-state trajectories during patches, shown side by side.
 
@@ -969,34 +1094,42 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
                leading (T, n_trials) shape as observations, e.g. 'rewards_seen_in_patch'.
                If the array has a trailing feature dimension its first column is used.
     params   : if provided, the action separatrix plane is overlaid on each panel.
-    elev     : camera elevation angle in degrees (default 20).
-    azim     : camera azimuth angle in degrees (default 30).
+    rx/ry/rz : rotations (degrees) about PC1/PC2/PC3 axes applied to the data.
+               The camera stays fixed at the separatrix-aligned view; the data and
+               axes rotate, so ry=90 genuinely looks like spinning the data 90° around PC2.
     """
     _steps_per_env = 20000
     _n_envs = max(1, traj_data['actor_hidden'].shape[0] // _steps_per_env)
-    obs     = traj_data['observations'].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)   # (T, n_trials, obs_dim)
-    hidden  = traj_data['actor_hidden'].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)   # (T, n_trials, hidden_size)
-    in_patch = traj_data['agent_in_patch'].reshape(_n_envs, _steps_per_env).T                     # (T, n_trials)
+    obs     = traj_data['observations'].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)
+    hidden  = traj_data['actor_hidden'].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)
+    in_patch = traj_data['agent_in_patch'].reshape(_n_envs, _steps_per_env).T
     periods = extract_patch_starts_and_stops(in_patch)
 
     # Pre-compute color signal array if not time-based
     if color_by != 'time':
-        raw = traj_data[color_by].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)  # (T, n_trials, ...)
-        color_signal = raw[..., 0]   # (T, n_trials), take first feature column
+        raw = traj_data[color_by].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)
+        color_signal = raw[..., 0]
         cbar_label = color_by
     else:
         color_signal = None
         cbar_label = 'time in patch'
 
+    R = _build_rotation_matrix(rx, ry, rz)   # applied to data, not the camera
+
+    if params is not None and pca is not None:
+        base_elev, base_azim = _separatrix_view_angles(params, pca)
+    else:
+        base_elev, base_azim = 20, 30
+
     _base_cmap = copy(plt.cm.viridis)
     dims = [(1, 'obs dim 1 high'), (2, 'obs dim 2 high'), (3, 'obs dim 3 high')]
 
-    # Pre-collect all projections to compute global axis limits
+    # Pre-collect all projections (rotated) to compute global axis limits
     all_projs_global = []
     for trial_periods in periods:
         for start, end in trial_periods:
             proj = pca.transform(hidden[start:end, :, :].reshape(-1, hidden.shape[-1]))[:, :3]
-            all_projs_global.append(proj)
+            all_projs_global.append(proj @ R.T)
     if all_projs_global:
         all_pts = np.concatenate(all_projs_global, axis=0)
         global_lims = [(all_pts[:, i].min(), all_pts[:, i].max()) for i in range(3)]
@@ -1008,9 +1141,9 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
 
     for ax, (dim, title) in zip(axes, dims):
         ax.set_title(title)
-        ax.view_init(elev=elev, azim=azim)
+        ax.view_init(elev=base_elev, azim=base_azim)
 
-        # Collect all patch projections + colour values so we can share norm
+        # Collect all patch projections (rotated) + colour values
         patch_projs  = []
         patch_colors = []
         for trial, trial_periods in enumerate(periods):
@@ -1018,7 +1151,7 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
                 patch_obs = obs[start:end, trial, dim]
                 if not np.any(patch_obs > threshold):
                     continue
-                proj = pca.transform(hidden[start:end, trial, :])[:, :3]
+                proj = pca.transform(hidden[start:end, trial, :])[:, :3] @ R.T
                 patch_projs.append(proj)
                 if color_signal is not None:
                     patch_colors.append(color_signal[start:end, trial])
@@ -1048,11 +1181,151 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
         for proj, cvals in zip(patch_projs, patch_colors):
             pts  = proj.reshape(-1, 1, 3)
             segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-            lc   = Line3DCollection(segs, cmap=cmap, norm=norm, linewidth=1.0, alpha=0.6)
+            lc   = Line3DCollection(segs, cmap=cmap, norm=norm, linewidth=1, alpha=1)
             lc.set_array(np.asarray(cvals[:-1]).ravel())
             ax.add_collection3d(lc)
 
-        _style_3d_ax(ax, norm, cmap, cbar_label)
+        if global_lims is not None:
+            ax.set_xlim(*global_lims[0])
+            ax.set_ylim(*global_lims[1])
+            ax.set_zlim(*global_lims[2])
+
+        _style_3d_ax(ax, norm, cmap, cbar_label, rotation=R)
+
+        # Re-apply after _style_3d_ax (autoscale_view may have overridden them)
+        if global_lims is not None:
+            ax.set_xlim(*global_lims[0])
+            ax.set_ylim(*global_lims[1])
+            ax.set_zlim(*global_lims[2])
+
+        if params is not None:
+            add_separatrix_plane(ax, params, pca, rotation=R)
+
+        # Re-apply after separatrix plane (surface plot may expand z limits)
+        if global_lims is not None:
+            ax.set_xlim(*global_lims[0])
+            ax.set_ylim(*global_lims[1])
+            ax.set_zlim(*global_lims[2])
+
+    plt.tight_layout()
+    return fig
+
+
+def plot_patch_endpoints_3d(traj_data, pca, threshold=0.5, figsize=(5, 4),
+                            params=None, elev=20, azim=30,
+                            plot_starts=True, plot_ends=True):
+    """Plot first and last pre-odor hidden states for each patch, by patch type.
+
+    Patch type = odor type (0/1/2).  Three 3-D PC scatter panels (one per patch
+    type) show the hidden state just before the first odor onset (green) and
+    just before the last odor onset (red) within each patch visit.  Only patches
+    with at least two odor-site visits are included.  A histogram of the
+    Euclidean distance between first and last pre-odor states is shown below,
+    overlaid for all three patch types.
+
+    Args:
+        traj_data:   Dict from load/parse with 'actor_hidden', 'agent_in_patch',
+                     'current_patch_num', 'reward_site_idx',
+                     'inter_odor_site_distances'.
+        pca:         Fitted PCA used to project hidden states.
+        threshold:   Unused (kept for API consistency).
+        figsize:     (width, height) per 3-D panel.
+        params:      If provided, separatrix plane is overlaid on 3-D panels.
+        elev, azim:  Camera angles for 3-D panels.
+    """
+    _steps_per_env = 20000
+    _n_envs = max(1, traj_data['actor_hidden'].shape[0] // _steps_per_env)
+
+    in_patch   = traj_data['agent_in_patch'].reshape(_n_envs, _steps_per_env).T   # (T, n_trials)
+    patch_nums = traj_data['current_patch_num'].reshape(_n_envs, _steps_per_env).T
+
+    periods = extract_patch_starts_and_stops(in_patch)
+
+    # Get all pre-odor onset states across all patch types
+    pre_odor = find_pre_odor_onset_states(traj_data, max_lookahead=1, include_first=True)
+    # pre_odor['hidden'][:, 0, :] = hidden state one step before odor onset
+    # pre_odor['trial_idx'], pre_odor['pre_t_idx'] locate each event
+
+    # hidden states, times-since-patch-start, and distances, keyed by patch type
+    hidden_by_type = {0: [], 1: [], 2: []}
+    times_by_type  = {0: [], 1: [], 2: []}
+    dists_by_type  = {0: [], 1: [], 2: []}
+
+    for trial, trial_periods in enumerate(periods):
+        mask = pre_odor['trial_idx'] == trial
+        if not np.any(mask):
+            continue
+        event_ts = pre_odor['pre_t_idx'][mask]
+        event_hs = pre_odor['hidden'][mask, 0, :]  # (n_events, H)
+
+        for start, end in trial_periods:
+            in_this_patch = (event_ts >= start) & (event_ts < end)
+            if np.sum(in_this_patch) < 2:
+                continue
+            patch_ts = event_ts[in_this_patch]
+            patch_hs = event_hs[in_this_patch]
+            order    = np.argsort(patch_ts)
+            h_first  = patch_hs[order[0]]
+            h_last   = patch_hs[order[-1]]
+            t_first  = int(patch_ts[order[0]]  - start)
+            t_last   = int(patch_ts[order[-1]] - start)
+            ptype    = int(patch_nums[start, trial])
+            if ptype not in hidden_by_type:
+                continue
+            if plot_starts:
+                hidden_by_type[ptype].append(h_first)
+                times_by_type[ptype].append(t_first)
+            if plot_ends:
+                hidden_by_type[ptype].append(h_last)
+                times_by_type[ptype].append(t_last)
+            dists_by_type[ptype].append(float(np.linalg.norm(h_last - h_first)))
+
+    type_colors = {0: '#1f77b4', 1: '#2ca02c', 2: '#ff7f0e'}
+    type_labels = {0: 'patch type 0', 1: 'patch type 1', 2: 'patch type 2'}
+
+    # Global axis limits and shared time colormap norm
+    all_pts  = []
+    all_times = []
+    for ptype in hidden_by_type:
+        for h in hidden_by_type[ptype]:
+            all_pts.append(pca.transform(h[None, :])[:, :3])
+        all_times.extend(times_by_type[ptype])
+    if all_pts:
+        all_pts   = np.concatenate(all_pts, axis=0)
+        global_lims = [(all_pts[:, i].min(), all_pts[:, i].max()) for i in range(3)]
+    else:
+        global_lims = None
+    time_norm = Normalize(vmin=min(all_times) if all_times else 0,
+                          vmax=max(all_times) if all_times else 1)
+    time_cmap = plt.cm.viridis
+
+    fig = plt.figure(figsize=(figsize[0], figsize[1] * 6))
+    gs  = fig.add_gridspec(4, 1, height_ratios=[3, 3, 3, 1], hspace=0.3)
+
+    axes_3d = [fig.add_subplot(gs[row], projection='3d') for row in range(3)]
+    ax_hist = fig.add_subplot(gs[3])
+
+    for ptype, ax in zip([0, 1, 2], axes_3d):
+        ax.set_title(f'patch type {ptype}', fontsize=8)
+        ax.view_init(elev=elev, azim=azim)
+
+        h_list = hidden_by_type[ptype]
+        t_list = times_by_type[ptype]
+
+        if h_list:
+            proj   = pca.transform(np.array(h_list))[:, :3]
+            colors = time_cmap(time_norm(np.array(t_list)))
+            ax.scatter(proj[:, 0], proj[:, 1], proj[:, 2],
+                       s=20, c=colors, alpha=0.6, edgecolors='none', zorder=5)
+            sm = plt.cm.ScalarMappable(cmap=time_cmap, norm=time_norm)
+            plt.colorbar(sm, ax=ax, label='time since patch start', shrink=0.4, pad=0.1)
+
+        if global_lims is not None:
+            ax.set_xlim(*global_lims[0])
+            ax.set_ylim(*global_lims[1])
+            ax.set_zlim(*global_lims[2])
+
+        ax.set_axis_off()
 
         if global_lims is not None:
             ax.set_xlim(*global_lims[0])
@@ -1061,8 +1334,23 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
 
         if params is not None:
             add_separatrix_plane(ax, params, pca)
+            if global_lims is not None:
+                ax.set_xlim(*global_lims[0])
+                ax.set_ylim(*global_lims[1])
+                ax.set_zlim(*global_lims[2])
 
-    plt.tight_layout()
+    for ptype in [0, 1, 2]:
+        dists = dists_by_type[ptype]
+        if dists:
+            ax_hist.hist(dists, bins=40, alpha=0.5,
+                         color=type_colors[ptype], label=type_labels[ptype],
+                         density=True)
+    ax_hist.set_xlabel('Euclidean distance (hidden state space)', fontsize=9)
+    ax_hist.set_ylabel('Density', fontsize=9)
+    ax_hist.set_title('First → last pre-odor distance per patch', fontsize=9)
+    ax_hist.legend(fontsize=8)
+    format_plot(ax_hist)
+
     return fig
 
 
@@ -1074,35 +1362,33 @@ def animate_patch_trajectories_3d(
     max_trajectories=None,
     color_by='time',
     params=None,
-    elev1=20,
-    azim1=30,
-    elev2=20,
-    azim2=120,
+    rx1=0, ry1=0, rz1=0,
+    rx2=0, ry2=0, rz2=0,
     fps=30,
     steps_per_frame=1,
     figsize=(10, 12),
     rotation=False,
     rotation_seconds=3,
+    dpi=150,
 ):
     """Animate patch trajectories in 3D PC space, building each trajectory step by step.
 
     Saves a video to save_path (.mp4 preferred, .gif also works).
 
-    rotation=False (default): 3 rows × 2 columns; both viewpoints (elev1/azim1 and
-        elev2/azim2) are shown side by side simultaneously throughout the video.
+    The camera stays fixed at the separatrix-aligned base view throughout.
+    Data is rotated by rx1/ry1/rz1 in phase 1 and rx2/ry2/rz2 in phase 3.
 
-    rotation=True: 3 rows × 1 column.  The video plays in three phases:
-        1. Trajectory builds up from view 1 (elev1/azim1).
-        2. Rotation: the view smoothly sweeps from view 1 to view 2 over
-           rotation_seconds seconds, with the full trajectory visible.
-        3. Trajectory builds up again from view 2 (elev2/azim2).
+    rotation=False (default): 3 rows × 2 columns; left column shows data at
+        rotation 1, right column at rotation 2, both building simultaneously.
 
-    Ghost lines show the full trajectory faintly; a growing colored segment
-    is drawn on top as the animation progresses.
+    rotation=True: 3 rows × 1 column.  Three phases:
+        1. Trajectory builds at data rotation (rx1, ry1, rz1).
+        2. Data smoothly rotates from rotation 1 to rotation 2 (Euler interpolation)
+           with full trajectory visible.
+        3. Trajectory builds at data rotation (rx2, ry2, rz2).
 
-    steps_per_frame : how many timesteps to advance per video frame (increase
-                      to speed up long trajectories).
-    rotation_seconds: duration of the rotation sweep between the two views.
+    steps_per_frame : timesteps to advance per video frame.
+    rotation_seconds: duration of the data rotation sweep.
     """
     _steps_per_env = 20000
     _n_envs = max(1, traj_data['actor_hidden'].shape[0] // _steps_per_env)
@@ -1119,12 +1405,15 @@ def animate_patch_trajectories_3d(
         color_signal = None
         cbar_label = 'time in patch'
 
+    R1 = _build_rotation_matrix(rx1, ry1, rz1)
+    R2 = _build_rotation_matrix(rx2, ry2, rz2)
+
     _base_cmap = copy(plt.cm.viridis)
     dims = [(1, 'obs dim 1 high'), (2, 'obs dim 2 high'), (3, 'obs dim 3 high')]
 
-    # --- collect per-dim patch projections and colour values ---
+    # --- collect per-dim patch projections (unrotated) and colour values ---
     per_dim_data = []
-    all_projs_global = []
+    all_projs_unrot = []
 
     for dim, _ in dims:
         patch_projs, patch_colors = [], []
@@ -1139,7 +1428,7 @@ def animate_patch_trajectories_3d(
                     color_signal[start:end, trial] if color_signal is not None
                     else np.arange(len(proj), dtype=float)
                 )
-                all_projs_global.append(proj)
+                all_projs_unrot.append(proj)
 
         if max_trajectories is not None and patch_projs:
             rng = np.random.default_rng(0)
@@ -1149,12 +1438,18 @@ def animate_patch_trajectories_3d(
 
         per_dim_data.append((patch_projs, patch_colors))
 
-    # global axis limits
-    if all_projs_global:
-        all_pts = np.concatenate(all_projs_global, axis=0)
+    # global axis limits: union of R1- and R2-rotated data so limits stay stable
+    if all_projs_unrot:
+        all_pts_unrot = np.concatenate(all_projs_unrot, axis=0)
+        all_pts = np.concatenate([all_pts_unrot @ R1.T, all_pts_unrot @ R2.T], axis=0)
         global_lims = [(all_pts[:, i].min(), all_pts[:, i].max()) for i in range(3)]
     else:
         global_lims = None
+
+    if params is not None and pca is not None:
+        base_elev, base_azim = _separatrix_view_angles(params, pca)
+    else:
+        base_elev, base_azim = 20, 30
 
     max_len = max(
         (len(p) for projs, _ in per_dim_data for p in projs),
@@ -1162,7 +1457,7 @@ def animate_patch_trajectories_3d(
     )
     n_frames = int(np.ceil(max_len / steps_per_frame))
 
-    # compute per-dim colour norms once (shared by both rotation and non-rotation paths)
+    # compute per-dim colour norms once
     norms = []
     cmaps = []
     for patch_projs, patch_colors in per_dim_data:
@@ -1180,17 +1475,18 @@ def animate_patch_trajectories_3d(
         norms.append(norm)
         cmaps.append(cmap)
 
-    def _draw_panel(ax, patch_projs, patch_colors, norm, cmap, elev, azim, title):
+    def _draw_panel(ax, patch_projs, patch_colors, norm, cmap, title, R_frame):
         ax.cla()
         ax.set_title(title, fontsize=9)
-        ax.view_init(elev=elev, azim=azim)
+        ax.view_init(elev=base_elev, azim=base_azim)
 
         if global_lims is not None:
             ax.set_xlim(*global_lims[0])
             ax.set_ylim(*global_lims[1])
             ax.set_zlim(*global_lims[2])
 
-        for proj, cvals in zip(patch_projs, patch_colors):
+        for proj_unrot, cvals in zip(patch_projs, patch_colors):
+            proj = proj_unrot @ R_frame.T
             ax.plot(proj[:, 0], proj[:, 1], proj[:, 2],
                     color='grey', alpha=0.15, linewidth=0.5)
 
@@ -1207,20 +1503,30 @@ def animate_patch_trajectories_3d(
             ax.add_collection3d(lc)
 
         if params is not None:
-            add_separatrix_plane(ax, params, pca)
+            add_separatrix_plane(ax, params, pca, rotation=R_frame)
 
-        _style_3d_ax(ax, norm, cmap, cbar_label, cbar=False)
+        _style_3d_ax(ax, norm, cmap, cbar_label, cbar=False, autoscale=False, rotation=R_frame)
 
     t = 0
 
     if rotation:
-        # --- build figure: 3 rows × 1 column ---
+        # --- build figure: 3 rows × 1 column, dedicated colorbar column ---
         fig = plt.figure(figsize=(figsize[0] // 2, figsize[1]))
-        row_axes = [fig.add_subplot(3, 1, row + 1, projection='3d') for row in range(3)]
+        gs = fig.add_gridspec(3, 2, width_ratios=[1, 0.03], wspace=0.02)
+        row_axes = [fig.add_subplot(gs[row, 0], projection='3d') for row in range(3)]
+        cbar_axes = [fig.add_subplot(gs[row, 1]) for row in range(3)]
+        for cax in cbar_axes:
+            p = cax.get_position()
+            h = p.height * 0.4
+            cax.set_position([p.x0, p.y0 + (p.height - h) / 2, p.width, h])
+        cbar_positions_rot = [cax.get_position() for cax in cbar_axes]
 
-        for ax, norm, cmap in zip(row_axes, norms, cmaps):
-            plt.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax,
-                         label=cbar_label, shrink=0.35, aspect=15).outline.set_visible(False)
+        for cax, norm, cmap in zip(cbar_axes, norms, cmaps):
+            cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap),
+                              cax=cax, label=cbar_label)
+            cb.outline.set_visible(False)
+            cax.tick_params(labelsize=6)
+            cax.yaxis.label.set_size(6)
 
         n_rot_frames = int(fps * rotation_seconds)
         total_frames = 2 * n_frames + n_rot_frames
@@ -1228,44 +1534,54 @@ def animate_patch_trajectories_3d(
         def _draw_frame(frame):
             nonlocal t
             if frame < n_frames:
-                # Phase 1: build trajectory at view 1
                 t = int((frame + 1) * steps_per_frame)
-                elev, azim = elev1, azim1
+                R_frame = R1
             elif frame < n_frames + n_rot_frames:
-                # Phase 2: rotate with full trajectory visible
                 t = max_len
                 alpha = (frame - n_frames) / n_rot_frames
-                elev = elev1 + alpha * (elev2 - elev1)
-                azim = azim1 + alpha * (azim2 - azim1)
+                R_frame = _build_rotation_matrix(
+                    rx1 + alpha * (rx2 - rx1),
+                    ry1 + alpha * (ry2 - ry1),
+                    rz1 + alpha * (rz2 - rz1),
+                )
             else:
-                # Phase 3: build trajectory at view 2
                 t = int((frame - n_frames - n_rot_frames + 1) * steps_per_frame)
-                elev, azim = elev2, azim2
+                R_frame = R2
 
             for ax, (dim, title), (patch_projs, patch_colors), norm, cmap in zip(
                 row_axes, dims, per_dim_data, norms, cmaps
             ):
-                _draw_panel(ax, patch_projs, patch_colors, norm, cmap, elev, azim, title)
+                _draw_panel(ax, patch_projs, patch_colors, norm, cmap, title, R_frame)
 
             fig.suptitle(f'step {t}', fontsize=10)
+            for cax, pos in zip(cbar_axes, cbar_positions_rot):
+                cax.set_position(pos)
 
         ani = animation.FuncAnimation(
             fig, _draw_frame, frames=total_frames, interval=1000 / fps
         )
 
     else:
-        # --- build figure: 3 rows × 2 columns (both views simultaneously) ---
+        # --- build figure: 3 rows × 2 columns + dedicated colorbar column ---
         fig = plt.figure(figsize=figsize)
+        gs = fig.add_gridspec(3, 3, width_ratios=[1, 1, 0.03], wspace=0.02)
         axes = [
-            [fig.add_subplot(3, 2, row * 2 + col + 1, projection='3d') for col in range(2)]
+            [fig.add_subplot(gs[row, col], projection='3d') for col in range(2)]
             for row in range(3)
         ]
-        view_params = [(elev1, azim1), (elev2, azim2)]
+        cbar_axes = [fig.add_subplot(gs[row, 2]) for row in range(3)]
+        for cax in cbar_axes:
+            p = cax.get_position()
+            h = p.height * 0.4
+            cax.set_position([p.x0, p.y0 + (p.height - h) / 2, p.width, h])
+        cbar_positions_static = [cax.get_position() for cax in cbar_axes]
 
-        # Attach each colorbar to both axes in its row so matplotlib positions it sensibly.
-        for pair, norm, cmap in zip(axes, norms, cmaps):
-            plt.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=pair,
-                         label=cbar_label, shrink=0.35, aspect=15).outline.set_visible(False)
+        for cax, norm, cmap in zip(cbar_axes, norms, cmaps):
+            cb = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap),
+                              cax=cax, label=cbar_label)
+            cb.outline.set_visible(False)
+            cax.tick_params(labelsize=6)
+            cax.yaxis.label.set_size(6)
 
         def _draw_frame(frame):
             nonlocal t
@@ -1274,10 +1590,12 @@ def animate_patch_trajectories_3d(
             for row_axes, (dim, title), (patch_projs, patch_colors), norm, cmap in zip(
                 axes, dims, per_dim_data, norms, cmaps
             ):
-                for ax, (elev, azim) in zip(row_axes, view_params):
-                    _draw_panel(ax, patch_projs, patch_colors, norm, cmap, elev, azim, title)
+                for ax, R_frame in zip(row_axes, [R1, R2]):
+                    _draw_panel(ax, patch_projs, patch_colors, norm, cmap, title, R_frame)
 
             fig.suptitle(f'step {t}', fontsize=10)
+            for cax, pos in zip(cbar_axes, cbar_positions_static):
+                cax.set_position(pos)
 
         ani = animation.FuncAnimation(
             fig, _draw_frame, frames=n_frames, interval=1000 / fps
@@ -1288,9 +1606,9 @@ def animate_patch_trajectories_3d(
         if not save_path.endswith('.gif'):
             save_path = save_path.rsplit('.', 1)[0] + '.gif'
             print(f'ffmpeg not found — saving as GIF instead: {save_path}')
-        ani.save(save_path, writer=animation.PillowWriter(fps=fps))
+        ani.save(save_path, writer=animation.PillowWriter(fps=fps), dpi=dpi)
     else:
-        ani.save(save_path, writer=animation.FFMpegWriter(fps=fps, bitrate=1800))
+        ani.save(save_path, writer=animation.FFMpegWriter(fps=fps, bitrate=3600), dpi=dpi)
 
     plt.close(fig)
     print(f'Saved to {save_path}')
@@ -1394,7 +1712,7 @@ def participation_ratio(X):
 
 
 # --- pre-odor onset detection ---
-def find_pre_odor_onset_states(traj_data, max_lookahead=3, patch_num=None):
+def find_pre_odor_onset_states(traj_data, max_lookahead=3, patch_num=None, include_first=False):
     """
     Detect reward-site entries via np.diff(reward_site_idx) > 0 and return
     hidden states and metadata for each qualifying event.
@@ -1433,7 +1751,7 @@ def find_pre_odor_onset_states(traj_data, max_lookahead=3, patch_num=None):
             onset_t = t + 2
             if onset_t - 1 + max_lookahead >= T:
                 continue
-            if rsi[onset_t, trial] == 0:
+            if rsi[onset_t, trial] == 0 and not include_first:
                 continue
             if patch_num is not None and patch_nums[onset_t, trial] != patch_num:
                 continue
@@ -1596,9 +1914,9 @@ def patch_progress(h_query, tte_data, n_neighbors=10, chunk_size=512):
 
 
 # --- (from cell pre-patch-states-3d) ---
-def plot_pre_patch_states_3d(traj_data, pca, params=None, figsize=(5, 4), color_by='time',
-                              show_background=False,
-                              elev1=20, azim1=30, elev2=20, azim2=120):
+def plot_pre_odor_site_states_3d(traj_data, pca, params=None, figsize=(5, 4), color_by='time',
+                                  show_background=False,
+                                  elev1=20, azim1=30, elev2=20, azim2=120):
     """
     Scatter hidden states just before each reward-site entry (in_patch events),
     using find_pre_odor_onset_states for detection.
@@ -1683,6 +2001,76 @@ def plot_pre_patch_states_3d(traj_data, pca, params=None, figsize=(5, 4), color_
 
         if ref_ax is None:
             ref_ax = ax_left
+
+    plt.tight_layout()
+    return fig
+
+
+def plot_pre_patch_states_3d(traj_data, pca, params=None, figsize=(5, 4), color_by='time',
+                              elev1=20, azim1=30, elev2=20, azim2=120):
+    """
+    Scatter all hidden states where the visual cue (obs[0]) is off, shown from two angles.
+    """
+    obs    = traj_data['observations']   # (T, obs_dim)
+    hidden = traj_data['actor_hidden']   # (T, H)
+
+    mask = obs[:, 0] < 0.5
+    sub_hidden = hidden[mask]
+
+    if len(sub_hidden) == 0:
+        print('No states with visual cue off found')
+        return
+
+    if color_by == 'inter_odor_site_distances':
+        raw        = traj_data['inter_odor_site_distances']
+        sub_colors = (raw[:, 0] if raw.ndim > 1 else raw)[mask]
+        cbar_label = 'Inter-odor site distance'
+    elif color_by == 'reward_site_idx':
+        raw        = traj_data['reward_site_idx']
+        sub_colors = (raw[:, 0] if raw.ndim > 1 else raw)[mask]
+        cbar_label = 'Reward site idx'
+    elif color_by != 'time':
+        raw        = traj_data[color_by]
+        sub_colors = (raw[:, 0] if raw.ndim > 1 else raw)[mask]
+        cbar_label = color_by.replace('_', ' ')
+        cbar_label = cbar_label[0].upper() + cbar_label[1:]
+    else:
+        sub_colors = np.arange(len(hidden), dtype=float)[mask]
+        cbar_label = 'Time step'
+
+    # Subsample for plotting efficiency
+    rng    = np.random.default_rng(42)
+    n_plot = min(5000, len(sub_hidden))
+    idx    = rng.choice(len(sub_hidden), size=n_plot, replace=False)
+    pts    = pca.transform(sub_hidden[idx])[:, :3]
+    colors = sub_colors[idx]
+
+    rng_bg    = np.random.default_rng(1)
+    bg_idx    = rng_bg.choice(len(hidden), size=min(2000, len(hidden)), replace=False)
+    bg_global = pca.transform(hidden[bg_idx])[:, :3]
+
+    cmap = plt.cm.viridis
+    norm = Normalize(vmin=np.nanmin(colors), vmax=np.nanmax(colors))
+
+    d_pr_all = participation_ratio(hidden)
+    d_pr_sub = participation_ratio(sub_hidden) if len(sub_hidden) > 1 else float('nan')
+    title = (f'Visual cue off — all states  (n={n_plot})\n'
+             f'$D_{{PR}}$ all={d_pr_all:.1f}  sub={d_pr_sub:.1f}')
+
+    fig = plt.figure(figsize=(figsize[0] * 2, figsize[1]))
+    for col, (elev, azim) in enumerate([(elev1, azim1), (elev2, azim2)]):
+        ax = fig.add_subplot(1, 2, col + 1, projection='3d')
+        if col == 0:
+            ax.scatter(bg_global[:, 0], bg_global[:, 1], bg_global[:, 2],
+                       facecolors='none', edgecolors='lightgray', s=6, alpha=0.3,
+                       depthshade=True, zorder=0, linewidths=0.5)
+        ax.scatter(pts[:, 0], pts[:, 1], pts[:, 2],
+                   c=colors, cmap=cmap, norm=norm, s=4, alpha=0.6, depthshade=True)
+        _style_3d_ax(ax, norm, cmap, cbar_label)
+        if params is not None:
+            add_separatrix_plane(ax, params, pca)
+        ax.view_init(elev=elev, azim=azim)
+        ax.set_title(title, fontsize=8)
 
     plt.tight_layout()
     return fig
@@ -2233,13 +2621,18 @@ def plot_neuron_reward_correlations(traj_data, top_n=5, figsize=(5, 3)):
 # --- (from cell pre-patch-with-next) ---
 def plot_pre_patch_states_with_next_3d(traj_data, params, pca,
                                         figsize=(5, 4), color_by='time', cbar_label='Time',
-                                        elev=20, azim=30, clean=False):
+                                        elev=20, azim=30, clean=False,
+                                        network=None, fp_input_vec=None,
+                                        n_fp_attempts=200, fp_tol=1e-3):
     """
     States detected via find_pre_odor_onset_states.
 
-    Returns (fig1, fig2):
+    Returns (fig1, fig2, fig3, fig4, fig5):
       fig1 — 3-D scatter with trajectory lines through the next 4 steps.
-      fig2 — 2-D: sep dist (initial and after 4 steps) vs pre-odor PC1.
+      fig2 — 2-D: sep dist (initial+after 4 steps) vs pre-odor PC1.
+      fig3 — 2-D: sep dist (initial+after 4 steps) vs FP PC1. None if network/fp_input_vec absent.
+      fig4 — 2-D: sep dist (initial+after 4 steps) vs patch progress (context-specific tte_data).
+      fig5 — 2-D: sep dist (initial+after 4 steps) vs patch progress derived from patch type 2 only.
     """
     events = find_pre_odor_onset_states(traj_data, max_lookahead=4)
 
@@ -2292,12 +2685,59 @@ def plot_pre_patch_states_with_next_3d(traj_data, params, pca,
     fig1 = plt.figure(figsize=(figsize[0] * n_patches, figsize[1]))
     fig2, axes2 = plt.subplots(1, n_patches,
                                figsize=(figsize[0] * n_patches, figsize[1]),
-                               sharey=True)
+                               sharey=True, sharex=True)
     if n_patches == 1:
         axes2 = [axes2]
 
     ctx_pca = PCA(n_components=1).fit(sub_hidden)
-    v = -ctx_pca.components_[0]
+    v = ctx_pca.components_[0]
+
+    # Sign convention: lower projection -> lower patch_progress (earlier in patch)
+    tte_data_all = collect_pre_odor_time_to_exit(traj_data)
+    _have_tte    = len(tte_data_all['time_to_exit']) >= 10
+    if _have_tte:
+        _pp_sign = patch_progress(sub_hidden, tte_data_all)
+        if np.corrcoef(sub_hidden @ v, _pp_sign)[0, 1] < 0:
+            v = -v
+    else:
+        v = -v
+
+    # FP PC1 (optional — requires network and fp_input_vec)
+    has_fps = network is not None and fp_input_vec is not None
+    fp_v = None
+    if has_fps:
+        _key   = jax.random.PRNGKey(42)
+        _idx   = jax.random.randint(_key, (n_fp_attempts,), 0, traj_data['actor_hidden'].shape[0])
+        _hinit = jnp.array(traj_data['actor_hidden'][_idx])
+        _fps, _conv, _ = find_fixed_points_batch(
+            params=params, network=network, input_vec=fp_input_vec,
+            h_inits=_hinit, max_steps=60000, learning_rate=0.001,
+            tolerance=fp_tol, verbose=False,
+        )
+        _ufps = np.array(filter_unique_fixed_points(_fps, _conv))
+        if len(_ufps) > 0:
+            def _max_eig_fn(fp):
+                J = jax.jacfwd(lambda h: rnn_step_batch(
+                    h[None], fp_input_vec, params, network).squeeze())(fp)
+                return float(jnp.abs(jnp.linalg.eigvals(J)).max())
+            _stable = np.array([_max_eig_fn(jnp.array(fp)) <= 1.0 for fp in _ufps])
+            _sfps   = _ufps[_stable]
+            if len(_sfps) > 0:
+                _fp_pca = PCA(n_components=1).fit(_sfps)
+                fp_v = _fp_pca.components_[0]
+                if _have_tte and np.corrcoef(sub_hidden @ fp_v, _pp_sign)[0, 1] < 0:
+                    fp_v = -fp_v
+            else:
+                print('No stable fixed points; skipping FP PC1 plots')
+                has_fps = False
+        else:
+            print('No fixed points converged; skipping FP PC1 plots')
+            has_fps = False
+
+    tte_data_per_patch = {
+        pnum: collect_pre_odor_time_to_exit(traj_data, patch_num=pnum)
+        for pnum in patch_vals
+    }
 
     for col, pnum in enumerate(patch_vals):
         mask = event_patch == pnum
@@ -2326,7 +2766,7 @@ def plot_pre_patch_states_with_next_3d(traj_data, params, pca,
         add_separatrix_plane(ax3, params, pca)
         ax3.view_init(elev=elev, azim=azim)
 
-        # 2-D panel
+        # fig2: pre-odor PC1, initial (blue) vs after 4 steps (red)
         ax2 = axes2[col]
         x   = h0 @ v
         d0  = sep_dist(h0)
@@ -2343,15 +2783,409 @@ def plot_pre_patch_states_with_next_3d(traj_data, params, pca,
 
     fig1.tight_layout()
     fig2.tight_layout()
-    return fig1, fig2
+
+    # --- fig3: FP PC1 x-axis ---
+    fig3 = None
+    if has_fps and fp_v is not None:
+        fig3, axes3 = plt.subplots(1, n_patches,
+                                   figsize=(figsize[0] * n_patches, figsize[1]),
+                                   sharey=True, sharex=True)
+        if n_patches == 1:
+            axes3 = [axes3]
+
+        for col, pnum in enumerate(patch_vals):
+            mask = event_patch == pnum
+            h0 = sub_hidden[mask]; h3 = sub_next3[mask]
+            x  = h0 @ fp_v
+            d0 = sep_dist(h0); d3 = sep_dist(h3)
+
+            ax = axes3[col]
+            ax.scatter(x, d0, color='steelblue', s=2, alpha=1, linewidths=0, label='initial')
+            ax.scatter(x, d3, color='tomato',    s=2, alpha=1, linewidths=0, label='after 4 steps')
+            ax.axhline(0, color='k', linewidth=0.8, linestyle='--')
+            ax.set_xlabel('Projection onto FP PC1', fontsize=8)
+            if col == 0:
+                ax.set_ylabel('Sep. distance', fontsize=8)
+            ax.set_title(f'Patch {pnum} — pre-site states', fontsize=8)
+            ax.legend(fontsize=7, frameon=False)
+            format_plot(ax)
+
+        fig3.tight_layout()
+
+    # --- fig4: patch_progress x-axis (context-specific tte_data per patch) ---
+    fig4, axes4_pp = plt.subplots(1, n_patches,
+                                  figsize=(figsize[0] * n_patches, figsize[1]),
+                                  sharey=True, sharex=True)
+    if n_patches == 1:
+        axes4_pp = [axes4_pp]
+
+    for col, pnum in enumerate(patch_vals):
+        mask  = event_patch == pnum
+        h0    = sub_hidden[mask]; h3 = sub_next3[mask]
+        tte_p = tte_data_per_patch[pnum]
+        ax4   = axes4_pp[col]
+
+        if len(tte_p['time_to_exit']) < 10:
+            ax4.set_title(f'Patch {pnum} (insufficient data)', fontsize=8)
+            continue
+
+        x0 = patch_progress(h0, tte_p)
+        d0 = sep_dist(h0); d3 = sep_dist(h3)
+
+        ax4.scatter(x0, d0, color='steelblue', s=2, alpha=1, linewidths=0, label='initial')
+        ax4.scatter(x0, d3, color='tomato',    s=2, alpha=1, linewidths=0, label='after 4 steps')
+        ax4.axhline(0, color='k', linewidth=0.8, linestyle='--')
+        ax4.set_xlabel(f'Patch progress (patch {pnum})', fontsize=8)
+        if col == 0:
+            ax4.set_ylabel('Sep. distance', fontsize=8)
+        ax4.set_title(f'Patch {pnum} — pre-site states', fontsize=8)
+        ax4.legend(fontsize=7, frameon=False)
+        format_plot(ax4)
+
+    fig4.tight_layout()
+
+    # --- fig5: patch_progress x-axis using tte_data from patch type 2 only ---
+    tte_data_p2 = tte_data_per_patch.get(2)
+    fig5, axes5_pp = plt.subplots(1, n_patches,
+                                  figsize=(figsize[0] * n_patches, figsize[1]),
+                                  sharey=True, sharex=True)
+    if n_patches == 1:
+        axes5_pp = [axes5_pp]
+
+    for col, pnum in enumerate(patch_vals):
+        mask = event_patch == pnum
+        h0   = sub_hidden[mask]; h3 = sub_next3[mask]
+        ax5  = axes5_pp[col]
+
+        if tte_data_p2 is None or len(tte_data_p2['time_to_exit']) < 10:
+            ax5.set_title(f'Patch {pnum} (insufficient data)', fontsize=8)
+            continue
+
+        x0 = patch_progress(h0, tte_data_p2)
+        d0 = sep_dist(h0); d3 = sep_dist(h3)
+
+        ax5.scatter(x0, d0, color='steelblue', s=2, alpha=1, linewidths=0, label='initial')
+        ax5.scatter(x0, d3, color='tomato',    s=2, alpha=1, linewidths=0, label='after 4 steps')
+        ax5.axhline(0, color='k', linewidth=0.8, linestyle='--')
+        ax5.set_xlabel('Patch progress (patch 2)', fontsize=8)
+        if col == 0:
+            ax5.set_ylabel('Sep. distance', fontsize=8)
+        ax5.set_title(f'Patch {pnum} — pre-site states', fontsize=8)
+        ax5.legend(fontsize=7, frameon=False)
+        format_plot(ax5)
+
+    fig5.tight_layout()
+
+    return fig1, fig2, fig3, fig4, fig5
 
 
-def plot_pre_patch_states_with_next_2d(traj_data, params, figsize=(5, 4), decoder_dir=None):
+def plot_patch_progress_trajectories(traj_data, patch_types=(1, 2), n_traj=10,
+                                      figsize=(4, 3), seed=0):
+    """
+    For n_traj patch visits from each patch type in patch_types, plots patch_progress
+    (derived from patch type 2's tte_data) vs time within patch.
+
+    X-axis: step within patch.  Y-axis: patch progress (patch 2 metric).
+    One subplot per patch type, trajectories overlaid as individual lines.
+    """
+    _spe = 20000
+    _ne  = max(1, traj_data['actor_hidden'].shape[0] // _spe)
+    H    = traj_data['actor_hidden'].shape[1]
+
+    obs_arr        = (traj_data['observations']
+                      .reshape(_ne, _spe, -1).transpose(1, 0, 2))            # (T, ne, obs)
+    in_patch_arr   = obs_arr[:, :, 0]                                         # (T, ne)
+    patch_type_arr = (traj_data['current_patch_num']
+                      .reshape(_ne, _spe, -1).transpose(1, 0, 2)[:, :, 0])  # (T, ne)
+    hidden_arr     = (traj_data['actor_hidden']
+                      .reshape(_ne, _spe, H).transpose(1, 0, 2))             # (T, ne, H)
+
+    T, n_envs = in_patch_arr.shape
+
+    tte_data_p2 = collect_pre_odor_time_to_exit(traj_data, patch_num=2)
+    if len(tte_data_p2['time_to_exit']) < 10:
+        print('Insufficient tte_data for patch type 2')
+        return None
+
+    # Find contiguous in-patch segments per env
+    rng = np.random.default_rng(seed)
+    visits_by_type = {pt: [] for pt in patch_types}
+
+    for env_idx in range(n_envs):
+        ip   = in_patch_arr[:, env_idx]
+        pt   = patch_type_arr[:, env_idx]
+        diff = np.diff(ip.astype(float))
+        entries = list(np.where(diff > 0)[0] + 1)
+        exits   = np.where(diff < 0)[0] + 1
+        if ip[0] > 0.5:
+            entries = [0] + entries
+        for t_start in entries:
+            later = exits[exits > t_start]
+            if len(later) == 0:
+                continue
+            t_end  = int(later[0])
+            p_type = int(round(pt[t_start]))
+            if p_type in visits_by_type:
+                visits_by_type[p_type].append((env_idx, t_start, t_end))
+
+    type_colors = {0: '#7570b3', 1: '#2ca02c', 2: '#d95f02'}
+
+    fig, axes = plt.subplots(1, len(patch_types),
+                             figsize=(figsize[0] * len(patch_types), figsize[1]),
+                             sharey=True, sharex=True)
+    if len(patch_types) == 1:
+        axes = [axes]
+
+    for ax, pt in zip(axes, patch_types):
+        visits = visits_by_type[pt]
+        if not visits:
+            ax.set_title(f'Patch {pt} (no visits)', fontsize=8)
+            continue
+
+        chosen = rng.choice(len(visits), size=min(n_traj, len(visits)), replace=False)
+        color  = type_colors.get(pt, 'steelblue')
+
+        for idx in chosen:
+            env_idx, t_start, t_end = visits[idx]
+            h_traj   = hidden_arr[t_start:t_end, env_idx, :]    # (L, H)
+            obs_traj = obs_arr[t_start:t_end, env_idx, :]       # (L, obs)
+            if len(h_traj) < 2:
+                continue
+            pp      = patch_progress(h_traj, tte_data_p2, n_neighbors=100).astype(float)
+            in_odor = np.any(obs_traj[:, 1:4] > 0.5, axis=-1)
+            t       = np.arange(len(pp))
+            t_vis, pp_vis = t[~in_odor], pp[~in_odor]
+            ax.plot(t_vis, pp_vis, color=color, alpha=0.6, lw=0.8)
+            ax.scatter(t_vis, pp_vis, color=color, alpha=0.4, s=8, linewidths=0)
+
+        ax.set_xlabel('Time within patch (steps)', fontsize=8)
+        ax.set_ylim(0, 1.05)
+        ax.set_title(f'Patch type {pt}', fontsize=8)
+        if pt == patch_types[0]:
+            ax.set_ylabel('Patch progress (patch 2 metric)', fontsize=8)
+        format_plot(ax)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_pred_reward_rate_vs_patch_progress(traj_data, n_traj=10, figsize=(4, 3),
+                                             seed=0, y_key='pred_reward_rate'):
+    """
+    Plot several patch trajectories in (patch_progress, pred_reward_rate) space.
+
+    X-axis: patch_progress (KNN estimate from tte_data, patch-2 metric).
+    Y-axis: traj_data[y_key] — defaults to 'pred_reward_rate'; pass
+            'exp_filtered_reward_rate' for the actual running estimate.
+    All patch types overlaid on a single axes; each trajectory coloured by
+    time-within-patch using the viridis colormap.
+    """
+    _spe = 20000
+    _ne  = max(1, traj_data['actor_hidden'].shape[0] // _spe)
+    H    = traj_data['actor_hidden'].shape[1]
+
+    obs_arr    = (traj_data['observations']
+                  .reshape(_ne, _spe, -1).transpose(1, 0, 2))           # (T, ne, obs)
+    in_patch_arr = obs_arr[:, :, 0]                                      # (T, ne)
+    hidden_arr = (traj_data['actor_hidden']
+                  .reshape(_ne, _spe, H).transpose(1, 0, 2))            # (T, ne, H)
+
+    raw_y = traj_data[y_key]
+    if raw_y.ndim == 1:
+        raw_y = raw_y[:, None]
+    y_arr = raw_y.reshape(_ne, _spe, -1).transpose(1, 0, 2)[:, :, 0]   # (T, ne)
+
+    T, n_envs = in_patch_arr.shape
+
+    tte_data_p2 = collect_pre_odor_time_to_exit(traj_data, patch_num=2)
+    if len(tte_data_p2['time_to_exit']) < 10:
+        print('Insufficient tte_data for patch type 2')
+        return None
+
+    rng = np.random.default_rng(seed)
+    all_visits = []
+    for env_idx in range(n_envs):
+        ip   = in_patch_arr[:, env_idx]
+        diff = np.diff(ip.astype(float))
+        entries = list(np.where(diff > 0)[0] + 1)
+        exits   = np.where(diff < 0)[0] + 1
+        if ip[0] > 0.5:
+            entries = [0] + entries
+        for t_start in entries:
+            later = exits[exits > t_start]
+            if len(later) == 0:
+                continue
+            all_visits.append((env_idx, t_start, int(later[0])))
+
+    if not all_visits:
+        print('No patch visits found')
+        return None
+
+    chosen = rng.choice(len(all_visits), size=min(n_traj, len(all_visits)), replace=False)
+
+    # Collect start/end y values across ALL visits for the scatter plot
+    y_starts, y_ends, t_starts_all = [], [], []
+    for env_idx, t_start, t_end in all_visits:
+        obs_traj = obs_arr[t_start:t_end, env_idx, :]
+        y_traj   = y_arr[t_start:t_end, env_idx]
+        in_odor  = np.any(obs_traj[:, 1:4] > 0.5, axis=-1)
+        y_vis    = y_traj[~in_odor]
+        if len(y_vis) < 2:
+            continue
+        y_starts.append(y_vis[0])
+        y_ends.append(y_vis[-1])
+        t_starts_all.append(t_start)
+    y_starts    = np.array(y_starts)
+    y_ends      = np.array(y_ends)
+    t_starts_all = np.array(t_starts_all)
+
+    cmap = plt.cm.viridis
+    fig, (ax, ax2) = plt.subplots(1, 2, figsize=(figsize[0] * 2, figsize[1]))
+
+    for idx in chosen:
+        env_idx, t_start, t_end = all_visits[idx]
+        h_traj   = hidden_arr[t_start:t_end, env_idx, :]
+        obs_traj = obs_arr[t_start:t_end, env_idx, :]
+        y_traj   = y_arr[t_start:t_end, env_idx]
+        if len(h_traj) < 2:
+            continue
+        pp      = patch_progress(h_traj, tte_data_p2, n_neighbors=100).astype(float)
+        in_odor = np.any(obs_traj[:, 1:4] > 0.5, axis=-1)
+        pp_vis  = pp[~in_odor]
+        y_vis   = y_traj[~in_odor]
+        if len(pp_vis) < 2:
+            continue
+        ax.plot([pp_vis[0], pp_vis[-1]], [y_vis[0], y_vis[-1]],
+                color='black', lw=0.5, zorder=4)
+        ax.scatter(pp_vis[0],  y_vis[0],  marker='*', color='green', s=40, zorder=5)
+        ax.scatter(pp_vis[-1], y_vis[-1], marker='*', color='red',   s=40, zorder=5)
+
+    ax.autoscale()
+    ax.set_xlabel('Patch progress', fontsize=8)
+    ax.set_ylabel(y_key.replace('_', ' '), fontsize=8)
+    format_plot(ax)
+
+    # Start vs end scatter, coloured by timestep of patch appearance
+    sc = ax2.scatter(y_starts, y_ends, s=4, alpha=1.0,
+                     c=t_starts_all, cmap='viridis')
+    cb2 = fig.colorbar(sc, ax=ax2, label='Timestep')
+    cb2.ax.tick_params(labelsize=6)
+    cb2.ax.yaxis.label.set_size(6)
+    lim_min = min(y_starts.min(), y_ends.min())
+    lim_max = max(y_starts.max(), y_ends.max())
+    ax2.plot([lim_min, lim_max], [lim_min, lim_max], 'k--', lw=0.8, alpha=0.5)
+    y_label = y_key.replace('_', ' ')
+    ax2.set_xlabel(f'{y_label} (patch start)', fontsize=8)
+    ax2.set_ylabel(f'{y_label} (patch end)', fontsize=8)
+    format_plot(ax2)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_patch_progress_trajectories_pc1(traj_data, patch_types=(1, 2), n_traj=10,
+                                          figsize=(4, 3), seed=0):
+    """
+    Like plot_patch_progress_trajectories but y-axis is the projection onto the
+    first PC of all pre-odor onset states (pre-odor PC1).  All timesteps within
+    each patch visit are plotted.
+    """
+    _spe = 20000
+    _ne  = max(1, traj_data['actor_hidden'].shape[0] // _spe)
+    H    = traj_data['actor_hidden'].shape[1]
+
+    obs_arr        = (traj_data['observations']
+                      .reshape(_ne, _spe, -1).transpose(1, 0, 2))            # (T, ne, obs)
+    in_patch_arr   = obs_arr[:, :, 0]                                         # (T, ne)
+    patch_type_arr = (traj_data['current_patch_num']
+                      .reshape(_ne, _spe, -1).transpose(1, 0, 2)[:, :, 0])  # (T, ne)
+    hidden_arr     = (traj_data['actor_hidden']
+                      .reshape(_ne, _spe, H).transpose(1, 0, 2))             # (T, ne, H)
+
+    # Pre-odor PC1
+    events = find_pre_odor_onset_states(traj_data)
+    sub_hidden = events['hidden'][:, 0]
+    if len(sub_hidden) < 2:
+        print('Insufficient pre-odor states for PCA')
+        return None
+
+    ctx_pca = PCA(n_components=1).fit(sub_hidden)
+    v = ctx_pca.components_[0]
+
+    tte_data_all = collect_pre_odor_time_to_exit(traj_data)
+    if len(tte_data_all['time_to_exit']) >= 10:
+        _pp_sign = patch_progress(sub_hidden, tte_data_all)
+        if np.corrcoef(sub_hidden @ v, _pp_sign)[0, 1] < 0:
+            v = -v
+
+    # Find contiguous in-patch segments per env
+    rng = np.random.default_rng(seed)
+    visits_by_type = {pt: [] for pt in patch_types}
+
+    T, n_envs = in_patch_arr.shape
+    for env_idx in range(n_envs):
+        ip   = in_patch_arr[:, env_idx]
+        pt   = patch_type_arr[:, env_idx]
+        diff = np.diff(ip.astype(float))
+        entries = list(np.where(diff > 0)[0] + 1)
+        exits   = np.where(diff < 0)[0] + 1
+        if ip[0] > 0.5:
+            entries = [0] + entries
+        for t_start in entries:
+            later = exits[exits > t_start]
+            if len(later) == 0:
+                continue
+            t_end  = int(later[0])
+            p_type = int(round(pt[t_start]))
+            if p_type in visits_by_type:
+                visits_by_type[p_type].append((env_idx, t_start, t_end))
+
+    type_colors = {0: '#7570b3', 1: '#2ca02c', 2: '#d95f02'}
+
+    fig, axes = plt.subplots(1, len(patch_types),
+                             figsize=(figsize[0] * len(patch_types), figsize[1]),
+                             sharey=True, sharex=True)
+    if len(patch_types) == 1:
+        axes = [axes]
+
+    for ax, pt in zip(axes, patch_types):
+        visits = visits_by_type[pt]
+        if not visits:
+            ax.set_title(f'Patch {pt} (no visits)', fontsize=8)
+            continue
+
+        chosen = rng.choice(len(visits), size=min(n_traj, len(visits)), replace=False)
+        color  = type_colors.get(pt, 'steelblue')
+
+        for idx in chosen:
+            env_idx, t_start, t_end = visits[idx]
+            h_traj   = hidden_arr[t_start:t_end, env_idx, :]   # (L, H)
+            obs_traj = obs_arr[t_start:t_end, env_idx, :]      # (L, obs)
+            if len(h_traj) < 2:
+                continue
+            in_odor   = np.any(obs_traj[:, 1:4] > 0.5, axis=-1)
+            proj      = h_traj @ v
+            t         = np.arange(len(proj))
+            t_vis, proj_vis = t[~in_odor], proj[~in_odor]
+            ax.plot(t_vis, proj_vis, color=color, alpha=0.6, lw=0.8)
+            ax.scatter(t_vis, proj_vis, color=color, alpha=0.4, s=8, linewidths=0)
+
+        ax.set_xlabel('Time within patch (steps)', fontsize=8)
+        ax.set_title(f'Patch type {pt}', fontsize=8)
+        if pt == patch_types[0]:
+            ax.set_ylabel('Pre-odor PC1 projection', fontsize=8)
+        format_plot(ax)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_pre_patch_states_with_next_2d(traj_data, params, figsize=(5, 4), tte_data=None):
     """
     2-D: open circles = initial hidden state, solid = after 3 steps.
     Coloured by ISI (viridis). NaN ISI dropped.
     States detected via find_pre_odor_onset_states (in_patch filter).
-    x-axis: pre-odor PC1.  y-axis: sep. distance.
+    x-axis: patch progress.  y-axis: sep. distance.
     """
     events = find_pre_odor_onset_states(traj_data)
     mask   = ~np.isnan(events['isi'])
@@ -2370,10 +3204,10 @@ def plot_pre_patch_states_with_next_2d(traj_data, params, figsize=(5, 4), decode
     w_norm = np.linalg.norm(w)
     def sep_dist(h): return (h @ w + b_diff) / w_norm
 
-    if decoder_dir is None:
-        decoder_dir = fit_remaining_time_decoder(traj_data)
-    v  = decoder_dir
-    x  = sub_hidden @ v
+    if tte_data is None:
+        tte_data = collect_pre_odor_time_to_exit(traj_data)
+    x0 = patch_progress(sub_hidden, tte_data)
+    x3 = patch_progress(sub_next3,  tte_data)
     d0 = sep_dist(sub_hidden)
     d3 = sep_dist(sub_next3)
 
@@ -2382,9 +3216,9 @@ def plot_pre_patch_states_with_next_2d(traj_data, params, figsize=(5, 4), decode
     colors = cmap(norm(sub_isi))
 
     fig, ax = plt.subplots(figsize=figsize)
-    ax.scatter(x, d0, facecolors='none', edgecolors=colors,
+    ax.scatter(x0, d0, facecolors='none', edgecolors=colors,
                s=10, alpha=1, linewidths=0.8, label='initial')
-    ax.scatter(x, d3, c=sub_isi, cmap=cmap, norm=norm,
+    ax.scatter(x3, d3, c=sub_isi, cmap=cmap, norm=norm,
                s=10, alpha=1, linewidths=0, label='after 3 steps')
     ax.axhline(0, color='k', linewidth=0.8, linestyle='--')
 
@@ -2393,7 +3227,7 @@ def plot_pre_patch_states_with_next_2d(traj_data, params, figsize=(5, 4), decode
     cb = plt.colorbar(sm, ax=ax, pad=0.02, label='Inter-odor site distance')
     cb.outline.set_visible(False)
 
-    ax.set_xlabel('Remaining time proj.', fontsize=8)
+    ax.set_xlabel('Patch progress', fontsize=8)
     ax.set_ylabel('Sep. distance', fontsize=8)
     ax.legend(fontsize=7, frameon=False)
     format_plot(ax)
@@ -3483,6 +4317,9 @@ def plot_patch_segments_with_fixed_points(
     includes_actions_and_rewards=False,
     points_path=None,
     patch_type=None,
+    stop_after_unique_inputs=False,
+    vmax_inputs=1,
+    vmin_inputs=-1,
 ):
     """Plot a single patch visit in 3D PC space, split by constant-input segments.
 
@@ -3578,9 +4415,19 @@ def plot_patch_segments_with_fixed_points(
         with open(points_path, 'rb') as _f:
             preloaded_fps = jnp.array(pickle.load(_f))
 
+    if stop_after_unique_inputs:
+        unique_inputs = {tuple(patch_inputs[s]) for s, _ in segments}
+        seen_inputs   = set()
+
     for seg_idx, (s, e) in enumerate(segments):
         seg_hidden = patch_hidden[s:e+1]
         raw_input  = patch_inputs[s]
+
+        if stop_after_unique_inputs:
+            seen_inputs.add(tuple(raw_input))
+            if seen_inputs >= unique_inputs:
+                # This is the last segment needed — plot it, then stop
+                pass  # falls through; break at end of this iteration
 
         # Build input_vec for FP search: [obs(n_obs), one_hot_action(2), reward(1)]
         if includes_actions_and_rewards:
@@ -3631,7 +4478,7 @@ def plot_patch_segments_with_fixed_points(
         # Top panel: full patch input matrix, channels x time
         im = ax_obs.imshow(
             patch_inputs.T,
-            aspect='auto', cmap='RdBu_r', vmin=-1, vmax=1,
+            aspect='auto', cmap='RdBu_r', vmin=vmin_inputs, vmax=vmax_inputs,
             interpolation='nearest',
             extent=[-0.5, T_patch - 0.5, n_input_dims - 0.5, -0.5],
         )
@@ -3784,6 +4631,9 @@ def plot_patch_segments_with_fixed_points(
                 fname_spec = f'trial{trial_idx}_patch{patch_idx}_seg{seg_idx}_spectra.pdf'
                 plt.savefig(os.path.join(save_dir, fname_spec), bbox_inches='tight')
             plt.show()
+
+        if stop_after_unique_inputs and seen_inputs >= unique_inputs:
+            break
 
 def save_fixed_points_for_unique_inputs(
     traj_data,
@@ -4201,57 +5051,22 @@ def find_exit_site_all_reward_patterns(
     return reward_patterns, exit_sites, fig, fig_prob
 
 
-def run_specified_reward_patterns_pca(
+def build_reward_pattern_inputs(
     reward_patterns_X,
-    ckpt_path,
-    train_state,
-    network,
-    net_params=None,
-    traj_data=None,
-    pca=None,
     odor_idx=3,
     odor_offset=12,
     odor_on=6,
     odor_off=1,
     input_dim=7,
-    hidden_size=64,
-    n_stay_threshold=3,
     n_initial_states=1,
-    seed=0,
-    elev=20,
-    azim=30,
-    figsize=(6, 5),
-    tte_data=None,
 ):
-    """Run specified reward patterns and visualise hidden-state trajectories in 3D PCA.
+    """Construct input sequences for specified reward patterns.
 
-    Args:
-        reward_patterns_X: (n_patterns, n_sites) int/bool array. Each row is a
-            reward pattern; 1 = rewarded at that site, 0 = not.
-        n_initial_states: Number of pre-patch initial states to sample. The same
-            states are used across all patterns.
-        [remaining args identical to find_exit_site_all_reward_patterns]
-        pca: Pre-fit sklearn PCA. Fitted on traj_data if None.
-
-    Returns:
-        fig_matrix: Reward-pattern / exit-site matrix figure (n_initial_states rows
-                    per pattern block).
-        fig_pca:    3-D PCA trajectory figure (one subplot per pattern,
-                    n_initial_states trajectories each, coloured by initial state).
-        exit_sites: int array (n_initial_states, n_patterns); exit site per
-                    (initial_state, pattern), or -1 if no exit.
+    Returns seq_batch: (n_initial_states * n_patterns, T_max, input_dim).
+    Batch order: is0_p0, is0_p1, ..., is0_pN, is1_p0, ...
     """
     reward_patterns_X = np.array(reward_patterns_X, dtype=int)
     n_patterns, n_sites = reward_patterns_X.shape
-    batch_size = n_initial_states * n_patterns
-
-    if net_params is None:
-        restored   = checkpoints.restore_checkpoint(
-            ckpt_dir=Path(ckpt_path).resolve(), target=train_state)
-        net_params = restored.params
-
-    # Build input sequences: tile each pattern n_initial_states times
-    # batch order: is0_p0, is0_p1, ..., is0_pN, is1_p0, ...
     T_max   = n_sites * (odor_on + odor_off) + odor_offset + odor_on + 1
     seq_pat = np.zeros((n_patterns, T_max, input_dim))
     seq_pat[:, :, 0] = 1
@@ -4261,9 +5076,55 @@ def run_specified_reward_patterns_pca(
             seq_pat[p_idx, t0:t0 + odor_on, odor_idx] = 1
             if pattern[i]:
                 seq_pat[p_idx, t0 + 4, 6] = 1
-    seq_batch = np.tile(seq_pat, (n_initial_states, 1, 1))  # (batch_size, T_max, input_dim)
+    return np.tile(seq_pat, (n_initial_states, 1, 1))
 
-    # Sample n_initial_states pre-patch states (False→True transitions)
+
+def plot_reward_pattern_results(
+    seq_batch,
+    reward_patterns_X,
+    network,
+    ckpt_path,
+    train_state,
+    net_params=None,
+    traj_data=None,
+    pca=None,
+    odor_offset=12,
+    odor_on=6,
+    odor_off=1,
+    hidden_size=64,
+    n_stay_threshold=3,
+    n_initial_states=1,
+    seed=0,
+    elev=20,
+    azim=30,
+    figsize=(6, 5),
+    tte_data=None,
+):
+    """Run the network forward on seq_batch and plot results.
+
+    Args:
+        seq_batch        : output of build_reward_pattern_inputs.
+        reward_patterns_X: (n_patterns, n_sites) int array.
+        network          : the Flax network module.
+        ckpt_path / train_state / net_params: checkpoint loading (net_params skips load).
+        traj_data        : used to sample initial hidden states and fit PCA.
+        pca              : pre-fit sklearn PCA; fitted from traj_data/hidden states if None.
+        seed             : RNG seed for sampling initial states from traj_data.
+
+    Returns:
+        fig_matrix, fig_pca, fig_pp, fig_exit_stats, exit_sites
+    """
+    reward_patterns_X = np.array(reward_patterns_X, dtype=int)
+    n_patterns, n_sites = reward_patterns_X.shape
+    batch_size = n_initial_states * n_patterns
+    T_max = seq_batch.shape[1]
+
+    if net_params is None:
+        restored   = checkpoints.restore_checkpoint(
+            ckpt_dir=Path(ckpt_path).resolve(), target=train_state)
+        net_params = restored.params
+
+    # Sample initial hidden states from pre-patch transitions
     if traj_data is not None:
         in_patch_flat = traj_data['agent_in_patch'].reshape(-1).astype(bool)
         actor_flat    = traj_data['actor_hidden'].reshape(-1, hidden_size)
@@ -4272,9 +5133,8 @@ def run_specified_reward_patterns_pca(
         pre_patch_idx = np.where(transitions)[0] + 2
         rng     = np.random.default_rng(seed)
         choices = rng.choice(len(pre_patch_idx), size=n_initial_states, replace=False)
-        init_actor  = actor_flat[pre_patch_idx[choices]]   # (n_initial_states, H)
-        init_critic = critic_flat[pre_patch_idx[choices]]  # (n_initial_states, H)
-        # Repeat each initial state n_patterns times
+        init_actor  = actor_flat[pre_patch_idx[choices]]
+        init_critic = critic_flat[pre_patch_idx[choices]]
         actor_hidden  = jnp.array(np.repeat(init_actor,  n_patterns, axis=0))
         critic_hidden = jnp.array(np.repeat(init_critic, n_patterns, axis=0))
     else:
@@ -4285,7 +5145,7 @@ def run_specified_reward_patterns_pca(
     rng_key      = jax.random.key(0)
     done_mask    = np.zeros(batch_size, dtype=bool)
 
-    all_hidden = np.zeros((batch_size, T_max, hidden_size))
+    all_hidden      = np.zeros((batch_size, T_max, hidden_size))
     exit_sites_flat = np.full(batch_size, -1, dtype=int)
     exit_times_flat = np.full(batch_size, T_max, dtype=int)
     t = 0
@@ -4320,9 +5180,7 @@ def run_specified_reward_patterns_pca(
         exit_times_flat[newly_done] = t
         done_mask |= newly_done
 
-    # Reshape to (n_initial_states, n_patterns)
     exit_sites = exit_sites_flat.reshape(n_initial_states, n_patterns)
-    exit_times = exit_times_flat.reshape(n_initial_states, n_patterns)
 
     # Fit PCA if not provided
     if pca is None:
@@ -4331,58 +5189,65 @@ def run_specified_reward_patterns_pca(
         else:
             pca = PCA(n_components=3).fit(all_hidden.reshape(-1, hidden_size))
 
-    # --- Matrix figure: n_initial_states rows per pattern block, separated by gaps ---
+    # --- Matrix figure: site=y, patch/seed=x ---
     cmap_mat = plt.matplotlib.colors.ListedColormap(['white', '#d3d3d3', '#4caf50', '#e53935'])
     bounds   = [-1.5, -0.5, 0.5, 1.5, 2.5]
     norm_mat = plt.matplotlib.colors.BoundaryNorm(bounds, cmap_mat.N)
 
     rows = []
-    ytick_pos, ytick_labels = [], []
-    row_idx = 0
+    non_sep_cols = []
+    col_idx = 0
     for p_idx in range(n_patterns):
         if p_idx > 0:
-            rows.append(np.full((1, n_sites), -1))  # separator
-            row_idx += 1
+            rows.append(np.full((1, n_sites), -1))
+            col_idx += 1
         for s_idx in range(n_initial_states):
             row = reward_patterns_X[p_idx].copy()
             site = exit_sites[s_idx, p_idx]
             if site >= 0:
                 row[site:] = 2
             rows.append(row[None, :])
-            ytick_pos.append(row_idx)
-            ytick_labels.append(f'P{p_idx} S{s_idx}')
-            row_idx += 1
+            non_sep_cols.append(col_idx)
+            col_idx += 1
     matrix_display = np.vstack(rows)
+    matrix_T       = matrix_display.T
 
-    n_rows_display = matrix_display.shape[0]
+    n_cols = matrix_display.shape[0]
     fig_matrix, ax_mat = plt.subplots(
-        figsize=(max(3, n_sites * 0.25) * 0.6, (max(2, n_rows_display * 0.3 + 1)) * 0.6))
-    ax_mat.imshow(matrix_display, aspect='auto', cmap=cmap_mat, norm=norm_mat,
-                  interpolation='nearest')
-    ax_mat.set_xlabel('Site', fontsize=8)
-    ax_mat.set_ylabel('Seed', fontsize=8)
-    _xtick_sites = np.arange(4, n_sites, 5)  # 5, 10, 15, ... (0-indexed positions)
-    ax_mat.set_xticks(_xtick_sites)
-    ax_mat.set_xticklabels(_xtick_sites + 1, fontsize=7)
-    ax_mat.set_yticks(ytick_pos)
-    ax_mat.set_yticklabels([], fontsize=7)
+        figsize=(max(3, n_cols * 0.4 + 1) * 0.6, max(2, n_sites * 0.18) * 0.6))
+    ax_mat.pcolormesh(matrix_T, cmap=cmap_mat, norm=norm_mat,
+                      edgecolors='white', linewidth=0.5)
+    ax_mat.set_xlim(0, n_cols)
+    ax_mat.set_ylim(0, n_sites)
+    ax_mat.set_xticks([c + 0.5 for c in non_sep_cols])
+    ax_mat.set_xticklabels([str((i % 10) + 1) for i in range(len(non_sep_cols))], fontsize=7)
+    ax_mat.set_xlabel('Patch', fontsize=8)
+    _ytick_sites = np.arange(4, n_sites, 5)
+    ax_mat.set_yticks(_ytick_sites + 0.5)
+    ax_mat.set_yticklabels(_ytick_sites + 1, fontsize=7)
+    ax_mat.set_ylabel('Site', fontsize=8)
+    legend_handles = [
+        mpatches.Patch(facecolor='#d3d3d3', edgecolor='black', linewidth=0.5, label='Unrewarded'),
+        mpatches.Patch(facecolor='#4caf50', edgecolor='black', linewidth=0.5, label='Rewarded'),
+        mpatches.Patch(facecolor='#e53935', edgecolor='black', linewidth=0.5, label='After exit'),
+    ]
+    ax_mat.legend(handles=legend_handles, fontsize=7, frameon=False,
+                  bbox_to_anchor=(1.02, 1), loc='upper left', borderaxespad=0)
     format_plot(ax_mat)
     fig_matrix.tight_layout()
 
-    # --- 3D PCA figure: n_initial_states rows × n_patterns columns ---
-    # Each row = one seed; each column = one pattern.
+    # --- 3D PCA figure ---
     t_norm = Normalize(vmin=0, vmax=T_max - 1)
     cmap_t = plt.cm.viridis
 
     fig_pca  = plt.figure(figsize=(figsize[0] * n_patterns, figsize[1] * n_initial_states))
-    axes_pca = {}  # keyed (s_idx, p_idx)
+    axes_pca = {}
     for s_idx in range(n_initial_states):
         for p_idx in range(n_patterns):
             subplot_idx = s_idx * n_patterns + p_idx + 1
             ax3 = fig_pca.add_subplot(n_initial_states, n_patterns, subplot_idx, projection='3d')
             axes_pca[(s_idx, p_idx)] = ax3
 
-    # First pass: draw trajectories, accumulate all projections for unified limits
     all_projs = []
     for s_idx in range(n_initial_states):
         for p_idx in range(n_patterns):
@@ -4408,7 +5273,6 @@ def run_specified_reward_patterns_pca(
             ax3.set_title(f'P{p_idx}:{pattern_str[:6]}.. S{s_idx}\n{exit_str}', fontsize=6)
             ax3.view_init(elev=elev, azim=azim)
 
-    # Unified limits from all projected data
     all_proj_cat = np.concatenate(all_projs, axis=0)
     pad  = 0.05
     xlim = (all_proj_cat[:, 0].min() - pad, all_proj_cat[:, 0].max() + pad)
@@ -4428,7 +5292,6 @@ def run_specified_reward_patterns_pca(
         ax3.quiver(ox, oy, oz, 0,  0,  zl, **kw)
         add_separatrix_plane(ax3, net_params, pca)
 
-    # One colorbar per row
     sm = plt.cm.ScalarMappable(cmap=cmap_t, norm=t_norm)
     sm.set_array([])
     for s_idx in range(n_initial_states):
@@ -4437,7 +5300,7 @@ def run_specified_reward_patterns_pca(
                               label='Time step', shrink=0.6, aspect=20)
         cb.outline.set_visible(False)
 
-    # Shared pattern labels (used in both bar chart and patch-progress plot)
+    # --- Pattern label helpers ---
     all_rewarded   = [np.all(reward_patterns_X[p] == 1) for p in range(n_patterns)]
     all_unrewarded = [np.all(reward_patterns_X[p] == 0) for p in range(n_patterns)]
     def _pattern_label(p):
@@ -4452,37 +5315,53 @@ def run_specified_reward_patterns_pca(
     # --- Patch-progress vs time ---
     fig_pp = None
     if tte_data is not None:
-        fig_pp, ax_pp = plt.subplots(figsize=(5, 3))
+        fig_pp, (ax_un, ax_re) = plt.subplots(1, 2, figsize=(8, 3), sharey=True)
+        ax_un.set_title('Unrewarded', fontsize=8)
+        ax_re.set_title('Rewarded',   fontsize=8)
+        for ax_ctx in (ax_un, ax_re):
+            ax_ctx.set_xlabel('Time step', fontsize=8)
+        ax_un.set_ylabel('Patch progress', fontsize=8)
+        ctx_axes = {True: ax_re, False: ax_un}
+
         for p_idx in range(n_patterns):
             col   = _pattern_color(p_idx)
             label = _pattern_label(p_idx)
+            ax_pp_ctx = ctx_axes.get(all_rewarded[p_idx])
+            if ax_pp_ctx is None:
+                continue
+
+            # Shade time steps where any odor input (columns 1:4) is active
+            odor_active = seq_batch[p_idx, :, 1:4].max(axis=-1) > 0.5
+            transitions = np.diff(odor_active.astype(int), prepend=0, append=0)
+            for t_s, t_e in zip(np.where(transitions == 1)[0], np.where(transitions == -1)[0]):
+                ax_pp_ctx.axvspan(t_s, t_e, alpha=0.08, color='grey', zorder=0, linewidth=0)
+
             for s_idx in range(n_initial_states):
                 batch_idx = s_idx * n_patterns + p_idx
                 t_end  = exit_times_flat[batch_idx]
                 h_traj = all_hidden[batch_idx, :t_end]
                 pp     = patch_progress(h_traj, tte_data)
                 ts     = np.arange(len(pp))
-                ax_pp.plot(ts, pp, color=col, linewidth=0.8, alpha=0.6,
-                           label=label if s_idx == 0 else None)
-                ax_pp.scatter(ts[0],  pp[0],  facecolors='none', edgecolors=col,
-                              s=20, linewidths=1.0, zorder=5)
+                ax_pp_ctx.plot(ts, pp, color=col, linewidth=0.8, alpha=0.6,
+                               label=label if s_idx == 0 else None)
+                ax_pp_ctx.scatter(ts[0],  pp[0],  facecolors='none', edgecolors=col,
+                                  s=20, linewidths=1.0, zorder=5)
                 if exit_sites_flat[batch_idx] >= 0:
-                    ax_pp.scatter(ts[-1], pp[-1], color=col, s=20, zorder=5)
-        ax_pp.set_xlabel('Time step', fontsize=8)
-        ax_pp.set_ylabel('Patch progress', fontsize=8)
-        handles, labels = ax_pp.get_legend_handles_labels()
-        # deduplicate legend entries
-        seen = {}
-        for h, l in zip(handles, labels):
-            seen.setdefault(l, h)
-        ax_pp.legend(seen.values(), seen.keys(), fontsize=7)
-        format_plot(ax_pp)
+                    ax_pp_ctx.scatter(ts[-1], pp[-1], color=col, s=20, zorder=5)
+
+        for ax_ctx in (ax_un, ax_re):
+            handles, labels = ax_ctx.get_legend_handles_labels()
+            seen = {}
+            for h, l in zip(handles, labels):
+                seen.setdefault(l, h)
+            if seen:
+                ax_ctx.legend(seen.values(), seen.keys(), fontsize=7)
+            format_plot(ax_ctx)
         fig_pp.tight_layout()
 
-    # --- Bar chart: mean sites before opt-out per pattern ---
-    # Treat -1 (no exit) as n_sites (agent stayed for all sites)
+    # --- Bar chart: mean sites before opt-out ---
     sites_before_exit = np.where(exit_sites >= 0, exit_sites, n_sites).astype(float)
-    means = sites_before_exit.mean(axis=0)   # (n_patterns,)
+    means = sites_before_exit.mean(axis=0)
     sems  = sites_before_exit.std(axis=0) / np.sqrt(n_initial_states)
 
     fig_exit_stats, ax_bar = plt.subplots(figsize=(max(3, n_patterns * 1.2), 3))
@@ -4499,6 +5378,47 @@ def run_specified_reward_patterns_pca(
     fig_exit_stats.tight_layout()
 
     return fig_matrix, fig_pca, fig_pp, fig_exit_stats, exit_sites
+
+
+def run_specified_reward_patterns_pca(
+    reward_patterns_X,
+    ckpt_path,
+    train_state,
+    network,
+    net_params=None,
+    traj_data=None,
+    pca=None,
+    odor_idx=3,
+    odor_offset=12,
+    odor_on=6,
+    odor_off=1,
+    input_dim=7,
+    hidden_size=64,
+    n_stay_threshold=3,
+    n_initial_states=1,
+    seed=0,
+    elev=20,
+    azim=30,
+    figsize=(6, 5),
+    tte_data=None,
+):
+    """Run specified reward patterns and visualise hidden-state trajectories in 3D PCA.
+
+    Thin wrapper around build_reward_pattern_inputs + plot_reward_pattern_results.
+    """
+    seq_batch = build_reward_pattern_inputs(
+        reward_patterns_X,
+        odor_idx=odor_idx, odor_offset=odor_offset, odor_on=odor_on, odor_off=odor_off,
+        input_dim=input_dim, n_initial_states=n_initial_states,
+    )
+    return plot_reward_pattern_results(
+        seq_batch, reward_patterns_X, network, ckpt_path, train_state,
+        net_params=net_params, traj_data=traj_data, pca=pca,
+        odor_offset=odor_offset, odor_on=odor_on, odor_off=odor_off,
+        hidden_size=hidden_size, n_stay_threshold=n_stay_threshold,
+        n_initial_states=n_initial_states, seed=seed,
+        elev=elev, azim=azim, figsize=figsize, tte_data=tte_data,
+    )
 
 
 def run_and_plot_synthetic(

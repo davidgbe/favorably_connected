@@ -26,6 +26,9 @@ import optax
 from typing import Tuple, Dict, Any, Optional, List
 from functools import partial
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from tqdm.auto import trange
 import argparse
 import pickle
@@ -68,9 +71,9 @@ N_STEPS_PER_UPDATE = 200
 
 def compute_a2c_loss(
     params: Any,
-    train_state: TrainState,
-    env_states: TreadmillEnvState,
-    env_params: TreadmillEnvParams,
+    train_state: Any,
+    env_states: Any,
+    env_params: Any,
     gamma: float,
     critic_weight: float,
     entropy_weight: float,
@@ -79,19 +82,15 @@ def compute_a2c_loss(
     activity_norm_weight: float,
     pred_obs_weight: float,
     input_noise_std: float,
+    hidden_size: int,
     unit_noise_std: float,
     rnn_type: str,
-    hidden_size: int,
     obs_size: int,
-) -> Tuple[jnp.ndarray, Dict[str, jnp.ndarray]]:
-    """Compute A2C loss by calling collect_trajectory with the params argument"""
-    
-    # Create a modified train_state that uses the params we're taking gradients w.r.t.
-    modified_train_state = train_state.replace(params=params)
-    
-    # Call collect_trajectory - now it will use the params argument
+) -> Tuple[jnp.ndarray, Tuple[Dict[str, jnp.ndarray], Any, Any]]:
+    """Compute A2C loss; collect_trajectory is called here so BPTT flows through the scan."""
+
     trajectory, final_train_state, final_env_states = collect_trajectory(
-        train_state=modified_train_state,
+        train_state=train_state.replace(params=params),
         env_states=env_states,
         env_params=env_params,
         input_noise_std=input_noise_std,
@@ -101,47 +100,42 @@ def compute_a2c_loss(
         obs_size=obs_size,
         n_steps=N_STEPS_PER_UPDATE,
     )
-    
-    # Now compute loss using the collected trajectory
-    returns = jax.vmap(compute_n_step_returns, (0, None, 0))(trajectory.rewards, gamma, trajectory.values[:, -1])
-    advantages = jnp.concatenate(
-        (returns[:, 1:] - trajectory.values[:, :-1], jnp.zeros((returns.shape[0], 1))),
-        axis=1
+
+    logits = trajectory.logits   # (num_envs, n_steps, action_size)
+    values = trajectory.values   # (num_envs, n_steps)
+
+    returns = jax.vmap(compute_n_step_returns, (0, None, 0))(
+        trajectory.rewards, gamma, lax.stop_gradient(values[:, -1])
     )
+    advantages = returns - values
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
 
-    # advantages = compute_gaes(trajectory.rewards, trajectory.values, gamma, 0.97)
-    advantages = (advantages - advantages.mean()) # / (advantages.std() + 1e-6)
-
-
-    # Actor loss (policy gradient
-    log_probs = jax.nn.log_softmax(trajectory.logits)
+    log_probs = jax.nn.log_softmax(logits)
     chosen_log_probs = jnp.take_along_axis(
         log_probs,
-        jax.lax.stop_gradient(trajectory.actions[..., None]),
-        axis=-1
+        lax.stop_gradient(trajectory.actions[..., None]),
+        axis=-1,
     ).squeeze(-1)
-    
-    actor_loss = -jnp.mean(chosen_log_probs * jax.lax.stop_gradient(advantages))
-    
-    # Critic loss
-    critic_loss = jnp.mean(advantages ** 2)
 
-    # predict environment parameters
+    actor_loss = -jnp.mean(chosen_log_probs * lax.stop_gradient(advantages))
+    critic_loss = jnp.mean((values - lax.stop_gradient(returns)) ** 2)
+
     env_quality_prediction_loss = jnp.mean(
-        (trajectory.pred_environment_quality - jax.lax.stop_gradient(trajectory.environment_quality)) ** 2 # added stop gradient call
+        (trajectory.pred_environment_quality - lax.stop_gradient(trajectory.environment_quality)) ** 2
     )
 
     global_reward_rate_loss = jnp.mean(
-        (trajectory.pred_reward_rate.squeeze() - jax.lax.stop_gradient(trajectory.exp_filtered_reward_rate) ) ** 2
-    )
-    
-    obs_plus_rewards = jnp.concatenate((trajectory.observations, trajectory.rewards[..., None]), axis=2)
-    pred_obs_loss = jnp.mean(
-        (trajectory.pred_obs[:, :-1, :] -  jax.lax.stop_gradient(obs_plus_rewards[:, 1:, :])) ** 2 # added stop gradient on obs_plus_rewards
+        (trajectory.pred_reward_rate.squeeze() - lax.stop_gradient(trajectory.exp_filtered_reward_rate)) ** 2
     )
 
-    # Entropy loss
-    probs = jax.nn.softmax(trajectory.logits)
+    obs_plus_rewards = jnp.concatenate(
+        (trajectory.observations[..., :obs_size], trajectory.rewards[..., None]), axis=2
+    )
+    pred_obs_loss = jnp.mean(
+        (trajectory.pred_obs[:, :-1, :] - lax.stop_gradient(obs_plus_rewards[:, 1:, :])) ** 2
+    )
+
+    probs = jax.nn.softmax(logits)
     entropy = -jnp.sum(probs * log_probs, axis=-1)
     entropy_loss = -jnp.mean(entropy)
 
@@ -149,19 +143,7 @@ def compute_a2c_loss(
         jnp.linalg.norm(trajectory.actor_hidden, axis=2).mean()
         + jnp.linalg.norm(trajectory.critic_hidden, axis=2).mean()
     )
-    
-    # for applying an L2 weight norm
-    # param_leaves = jax.tree_util.tree_leaves(final_train_state.params)
-    # l2_weight_norm = jnp.sum(jnp.array(
-    #     jax.tree_util.tree_map(
-    #         lambda p: jnp.sum(jnp.square(p)),
-    #         param_leaves,
-    #     )
-    # ))
 
-    # jax.debug.print('Env quality pred err: {x}', x=env_quality_prediction_loss)
-    
-    # Total loss
     total_loss = (
         actor_loss
         + critic_weight * critic_loss
@@ -171,7 +153,17 @@ def compute_a2c_loss(
         + pred_obs_weight * pred_obs_loss
         + global_reward_weight * global_reward_rate_loss
     )
-    
+
+    # jax.debug.print("Actor loss: {actor_loss}, Critic loss: {critic_loss}, Entropy loss: {entropy_loss}, Activity loss: {activity_loss}",
+    #                 actor_loss=actor_loss,
+    #                 critic_loss=critic_weight * critic_loss,
+    #                 entropy_loss=entropy_weight * entropy_loss,
+    #                 activity_loss=activity_norm_weight * activity_norm)
+    # jax.debug.print("Global reward loss: {global_reward_rate_loss}",
+    #                 global_reward_rate_loss=global_reward_weight * global_reward_rate_loss)
+
+    # jax.debug.print('Reward rate: {x}', x=trajectory.exp_filtered_reward_rate)
+
     metrics = {
         'total_loss': total_loss,
         'actor_loss': actor_loss,
@@ -179,11 +171,9 @@ def compute_a2c_loss(
         'entropy_loss': entropy_loss,
         'activity_loss': activity_norm,
         'mean_reward': jnp.mean(trajectory.rewards),
-        'final_train_state': jax.tree_util.tree_map(lax.stop_gradient, final_train_state),
-        'final_env_states': jax.tree_util.tree_map(lax.stop_gradient, final_env_states),
     }
-    
-    return total_loss, metrics
+
+    return total_loss, (metrics, jax.lax.stop_gradient(final_train_state), jax.lax.stop_gradient(final_env_states))
 
 
 def compute_n_step_returns(rewards, gamma, v_t):
@@ -267,10 +257,9 @@ def train_step(
 ) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
     """Single training step"""
     
-    # Compute gradients
     grad_fn = jax.grad(compute_a2c_loss, has_aux=True)
-    grads, metrics = grad_fn(
-        train_state.params,  # This is the params argument to compute_a2c_loss
+    grads, (metrics, final_train_state, final_env_states) = grad_fn(
+        train_state.params,
         train_state,
         env_states,
         env_params,
@@ -282,14 +271,14 @@ def train_step(
         activity_norm_weight,
         pred_obs_weight,
         input_noise_std,
+        hidden_size,
         unit_noise_std,
         rnn_type,
-        hidden_size,
         obs_size,
     )
 
     metrics['grad_norm'] = optax.global_norm(grads)
-    
+
     # Apply updates
     optimizer = optax.chain(
         optax.clip_by_global_norm(0.5),   # try values 0.3 – 1.0 depending on stability
@@ -302,10 +291,7 @@ def train_step(
         grads, train_state.opt_state, train_state.params
     )
     new_params = optax.apply_updates(train_state.params, updates)
-    # Get updated states from metrics
-    final_train_state = metrics['final_train_state']
-    final_env_states = metrics['final_env_states']
-    
+
     # Update training state
     final_train_state = final_train_state.replace(
         params=new_params,
@@ -325,16 +311,18 @@ class TrainingConfig:
     patch_types_per_env: int = 3
     obs_size: int = 4  # patch_types_per_env + 1
     action_size: int = 2
-    dwell_time_for_reward: int = 6
+    dwell_time_for_reward: int = 3
     reward_site_len: int = 3
     input_noise_std: float = 1e-2
     unit_noise_std: float = 1e-2
-    reward_param_style: int = 0
-    reward_func_type: int = 0
+    reward_param_style: str = 'fixed'
+    reward_func_type: str = 'exp'
     reward_decay_consts: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0.0, 10.0, 30.0]))
     reward_prob_prefactors: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0.8, 0.8, 0.8]))
+    fixed_patches: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0, 0, 0]))
 
     reward_decay_range: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0.0, 40.0]))
+    reward_prob_range: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0.0, 1.0]))
     interreward_len_bounds: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([1.0, 6.0]))
     interreward_len_decay_rate: float = 0.8
     interpatch_len_bounds: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([1.0, 12.0]))
@@ -362,26 +350,23 @@ class TrainingConfig:
 
 
 def save_config_to_json(config: TrainingConfig, filepath: str) -> None:
-    """Save TrainingConfig to JSON, converting int enums to readable strings."""
+    """Save TrainingConfig to JSON."""
     config_dict = serialization.to_state_dict(config)
-    # Convert ints to strings for readability
-    config_dict['reward_param_style'] = RewardParamStyle(config_dict['reward_param_style']).name.lower()
-    config_dict['reward_func_type'] = RewardFuncType(config_dict['reward_func_type']).name.lower()
     with open(filepath, 'w') as f:
         json.dump(config_dict, f, indent=2)
 
 
 def load_config_from_json(filepath: str) -> TrainingConfig:
-    """Load TrainingConfig from JSON, converting string enums back to ints.
+    """Load TrainingConfig from JSON.
     Missing fields will use their defaults from TrainingConfig."""
     with open(filepath, 'r') as f:
         config_dict = json.load(f)
 
-    # Convert strings back to ints (only if present)
-    if 'reward_param_style' in config_dict:
-        config_dict['reward_param_style'] = reward_param_style_str_to_int(config_dict['reward_param_style'])
-    if 'reward_func_type' in config_dict:
-        config_dict['reward_func_type'] = reward_func_type_str_to_int(config_dict['reward_func_type'])
+    # Handle legacy integer values for reward_param_style and reward_func_type
+    if 'reward_param_style' in config_dict and isinstance(config_dict['reward_param_style'], int):
+        config_dict['reward_param_style'] = RewardParamStyle(config_dict['reward_param_style']).name.lower()
+    if 'reward_func_type' in config_dict and isinstance(config_dict['reward_func_type'], int):
+        config_dict['reward_func_type'] = RewardFuncType(config_dict['reward_func_type']).name.lower()
 
     # Convert list fields to JAX arrays
     if 'reward_decay_consts' in config_dict:
@@ -394,6 +379,8 @@ def load_config_from_json(filepath: str) -> TrainingConfig:
         config_dict['interreward_len_bounds'] = jnp.array(config_dict['interreward_len_bounds'])
     if 'interpatch_len_bounds' in config_dict:
         config_dict['interpatch_len_bounds'] = jnp.array(config_dict['interpatch_len_bounds'])
+    if 'fixed_patches' in config_dict:
+        config_dict['fixed_patches'] = jnp.array(config_dict['fixed_patches'])
 
     # Start with defaults and update with loaded values
     config = TrainingConfig()
@@ -475,11 +462,13 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
     rng_key = random.key(config.seed)
     env_params = treadmill_session_default_params()
     env_params = env_params.replace(
-        reward_param_style=config.reward_param_style,
-        reward_func_type=config.reward_func_type,
+        reward_param_style=reward_param_style_str_to_int(config.reward_param_style),
+        reward_func_type=reward_func_type_str_to_int(config.reward_func_type),
+        fixed_patches=config.fixed_patches,
         reward_decay_consts=config.reward_decay_consts,
         reward_prob_prefactors=config.reward_prob_prefactors,
         reward_decay_range=config.reward_decay_range,
+        reward_prob_range=config.reward_prob_range,
         interreward_len_bounds=config.interreward_len_bounds,
         interreward_len_decay_rate=config.interreward_len_decay_rate,
         interpatch_len_bounds=config.interpatch_len_bounds,
@@ -542,7 +531,10 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
 
     save_dir_rewards = save_dir / '_reward_rates'
     save_dir_rewards.mkdir(parents=True, exist_ok=True)
-    
+
+    results_dir = Path('results') / config.exp_name
+    results_dir.mkdir(parents=True, exist_ok=True)
+
     best_session_reward = -np.inf
 
     # Training loop (outer loop stays in Python for logging)
@@ -616,6 +608,16 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
                 keep=1,
             )
 
+        if (session_num + 1) % 50 == 0 or session_num == 0:
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.plot(all_session_rewards)
+            ax.set_xlabel('Session')
+            ax.set_ylabel('Mean reward rate')
+            ax.set_title(config.exp_name)
+            fig.tight_layout()
+            fig.savefig(results_dir / 'reward_rate.png', dpi=100)
+            plt.close(fig)
+
         sn = zero_pad(session_num, 6)
         with open(save_dir_rewards / f'{sn}', 'ab') as f:
             np.save(f, avg_rewards_per_update)
@@ -637,8 +639,9 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
     rng_key = random.key(config.seed)
     env_params = treadmill_session_default_params()
     env_params = env_params.replace(
-        reward_param_style=config.reward_param_style,
-        reward_func_type=config.reward_func_type,
+        reward_param_style=reward_param_style_str_to_int(config.reward_param_style),
+        reward_func_type=reward_func_type_str_to_int(config.reward_func_type),
+        fixed_patches=config.fixed_patches,
         reward_decay_consts=config.reward_decay_consts,
         reward_prob_prefactors=config.reward_prob_prefactors,
         reward_decay_range=config.reward_decay_range,
@@ -647,6 +650,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
         interpatch_len_bounds=config.interpatch_len_bounds,
         interpatch_len_decay_rate=config.interpatch_len_decay_rate,
         reward_site_len=config.reward_site_len,
+        dwell_time_for_reward=config.dwell_time_for_reward,
     )
 
     session_steps = N_UPDATES_PER_SESSION * N_STEPS_PER_UPDATE
@@ -886,9 +890,6 @@ def main():
         # Update exp_name with timestamp if not set in config
         if not config.exp_name or config.exp_name == '':
             config = config.replace(exp_name=f"json_config_{time_stamp}")
-        if args.exp_title and args.exp_title != '':
-            exp_name = f'{args.exp_title}_seed_{config.seed}_{time_stamp}'
-            config = config.replace(exp_name=exp_name)
     else:
         # Build config from command-line arguments (original behavior)
         exp_name = f'{args.exp_title}_seed_{args.seed}_{time_stamp}'
@@ -908,8 +909,8 @@ def main():
                 hidden_size=64,
                 obs_size=4,
                 rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
-                reward_param_style=reward_param_style_str_to_int(args.curr_style),
-                reward_func_type=reward_func_type_str_to_int(args.reward_func),
+                reward_param_style=args.curr_style,
+                reward_func_type=args.reward_func,
                 unit_noise_std=0,
                 input_noise_std=0 #0.02,
             )
@@ -930,8 +931,8 @@ def main():
                 obs_size=4,
                 output_state_save_rate=50,
                 rnn_type=args.rnn_type if args.rnn_type else 'VANILLA',
-                reward_param_style=reward_param_style_str_to_int(args.curr_style),
-                reward_func_type=reward_func_type_str_to_int(args.reward_func),
+                reward_param_style=args.curr_style,
+                reward_func_type=args.reward_func,
                 unit_noise_std=0.01,
                 input_noise_std=0.01,
             )
