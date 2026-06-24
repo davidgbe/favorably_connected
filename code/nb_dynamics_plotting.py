@@ -16,7 +16,7 @@ import optax
 from jax import jit
 from flax.training import checkpoints
 from pathlib import Path
-from matplotlib.colors import Normalize, TwoSlopeNorm
+from matplotlib.colors import Normalize, TwoSlopeNorm, LinearSegmentedColormap
 from matplotlib.collections import LineCollection
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from matplotlib.cm import ScalarMappable
@@ -2686,12 +2686,16 @@ def plot_pre_patch_states_with_next_3d(traj_data, params, pca,
     """
     States detected via find_pre_odor_onset_states.
 
-    Returns (fig1, fig2, fig3, fig4, fig5):
+    Returns (fig1, fig2, fig3, fig4, fig5, fig6):
       fig1 — 3-D scatter with trajectory lines through the next 4 steps.
       fig2 — 2-D: sep dist (initial+after 4 steps) vs pre-odor PC1.
-      fig3 — 2-D: sep dist (initial+after 4 steps) vs FP PC1. None if network/fp_input_vec absent.
+      fig3 — 2-D: sep dist (initial+after 4 steps) vs FP PC1 (stable FPs from
+             fp_input_vec). None if network/fp_input_vec absent.
       fig4 — 2-D: sep dist (initial+after 4 steps) vs patch progress (context-specific tte_data).
       fig5 — 2-D: sep dist (initial+after 4 steps) vs patch progress derived from patch type 2 only.
+      fig6 — 2-D: sep dist (initial+after 4 steps) vs projection onto the FP
+             axis (first PC of all converged fixed points for input
+             [1,0,0,0,0,1,0]). None if network is absent.
     """
     events = find_pre_odor_onset_states(traj_data, max_lookahead=4)
 
@@ -2935,7 +2939,54 @@ def plot_pre_patch_states_with_next_3d(traj_data, params, pca,
 
     fig5.tight_layout()
 
-    return fig1, fig2, fig3, fig4, fig5
+    # --- fig6: FP-axis x-axis, FPs found for input [1, 0, 0, 0, 0, 1, 0] ---
+    # FP axis = first PC of all converged fixed points for this fixed input.
+    fig6 = None
+    if network is not None:
+        _fp6_input = jnp.array([1., 0., 0., 0., 0., 1., 0.])
+        _key6   = jax.random.PRNGKey(42)
+        _idx6   = jax.random.randint(_key6, (n_fp_attempts,), 0, traj_data['actor_hidden'].shape[0])
+        _hinit6 = jnp.array(traj_data['actor_hidden'][_idx6])
+        _fps6, _conv6, _ = find_fixed_points_batch(
+            params=params, network=network, input_vec=_fp6_input,
+            h_inits=_hinit6, max_steps=60000, learning_rate=0.001,
+            tolerance=fp_tol, verbose=False,
+        )
+        _ufps6 = np.array(filter_unique_fixed_points(_fps6, _conv6))
+        if len(_ufps6) >= 2:
+            fp6_v = PCA(n_components=1).fit(_ufps6).components_[0]
+            # Match sign convention used for the other axes
+            if _have_tte and np.corrcoef(sub_hidden @ fp6_v, _pp_sign)[0, 1] < 0:
+                fp6_v = -fp6_v
+
+            fig6, axes6 = plt.subplots(1, n_patches,
+                                       figsize=(figsize[0] * n_patches, figsize[1]),
+                                       sharey=True, sharex=True)
+            if n_patches == 1:
+                axes6 = [axes6]
+
+            for col, pnum in enumerate(patch_vals):
+                mask = event_patch == pnum
+                h0 = sub_hidden[mask]; h3 = sub_next3[mask]
+                x  = h0 @ fp6_v
+                d0 = sep_dist(h0); d3 = sep_dist(h3)
+
+                ax = axes6[col]
+                ax.scatter(x, d0, color='steelblue', s=2, alpha=1, linewidths=0, label='initial')
+                ax.scatter(x, d3, color='tomato',    s=2, alpha=1, linewidths=0, label='after 4 steps')
+                ax.axhline(0, color='k', linewidth=0.8, linestyle='--')
+                ax.set_xlabel('Projection onto FP axis ([1,0,0,0,0,1,0])', fontsize=8)
+                if col == 0:
+                    ax.set_ylabel('Sep. distance', fontsize=8)
+                ax.set_title(f'Patch {pnum} — pre-site states', fontsize=8)
+                ax.legend(fontsize=7, frameon=False)
+                format_plot(ax)
+
+            fig6.tight_layout()
+        else:
+            print('Fewer than 2 unique fixed points for input [1,0,0,0,0,1,0]; skipping FP-axis plots')
+
+    return fig1, fig2, fig3, fig4, fig5, fig6
 
 
 def plot_patch_progress_trajectories(traj_data, patch_types=(1, 2), n_traj=10,
@@ -4661,7 +4712,8 @@ def plot_patch_segments_with_fixed_points(
                 fp_norm = TwoSlopeNorm(vcenter=1.0,
                                        vmin=min(eig_vmin, 0.999),
                                        vmax=max(eig_vmax, 1.001))
-                cmap_fp = plt.cm.coolwarm
+                cmap_fp = LinearSegmentedColormap.from_list(
+                    'eig_div', ['#2166ac', '#762a83', '#b2182b'])  # blue → purple → red, no white center
                 ax_3d.scatter(fp_proj[:, 0], fp_proj[:, 1], fp_proj[:, 2],
                               s=80, marker='o', c=max_eigs, cmap=cmap_fp,
                               norm=fp_norm, edgecolors='k', linewidths=0.5, zorder=6)
