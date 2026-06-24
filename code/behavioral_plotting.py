@@ -122,6 +122,7 @@ def plot_session(data_path, session_idx, xlim=None, max_reward_param=30,
     fig.tight_layout()
     if save_dir is not None:
         fig.savefig(os.path.join(save_dir, 'raw_behavioral_trace.png'))
+        fig.savefig(os.path.join(save_dir, 'raw_behavioral_trace.svg'))
 
     labels = ['Unrewarded', 'Low reward', 'High reward']
     if color_by_reward_param:
@@ -272,7 +273,8 @@ def load_odor_site_df(load_path, nn_num=0, lim=None, brief=False):
 
 def plot_patch_statistics_by_session(df, max_reward_param=40, fixed_colors=False,
                                       x_axis='patch_reward_param', offsets=None,
-                                      x_mask=None, x_tick_labels=None, ylim_right=None):
+                                      x_mask=None, x_tick_labels=None, ylim_right=None,
+                                      save_dir=None):
     """Per-session version: groups by session_number × x_axis (patch_reward_param or patch_type).
 
     x_mask : sequence of 0/1 (or bool) aligned to the sorted x_vals, controlling which
@@ -396,6 +398,10 @@ def plot_patch_statistics_by_session(df, max_reward_param=40, fixed_colors=False
     sns.despine(ax=ax, bottom=True)
 
     plt.tight_layout()
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        fig.savefig(os.path.join(save_dir, 'patch_statistics_by_session.png'))
+        fig.savefig(os.path.join(save_dir, 'patch_statistics_by_session.svg'))
     plt.show()
     return summary_df
 

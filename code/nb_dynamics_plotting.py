@@ -1080,7 +1080,8 @@ def add_separatrix_plane(ax, params, pca, n_pts=60, alpha=0.2, color='steelblue'
 
 # --- (from cell 603947a4-78ec-4e47-8215-9cd37f44d61f) ---
 def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_trajectories=None,
-                                color_by='time', params=None, pca=None, rx=0, ry=0, rz=0):
+                                color_by='time', params=None, pca=None, rx=0, ry=0, rz=0,
+                                input_color_map=None, save_dir=None):
     """
     Three 3-D PC plots of hidden-state trajectories during patches, shown side by side.
 
@@ -1136,6 +1137,12 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
     else:
         global_lims = None
 
+    if input_color_map is not None:
+        _icm_arrays = np.stack([a for a, _ in input_color_map])
+        _icm_colors = [c for _, c in input_color_map]
+    else:
+        _icm_arrays = _icm_colors = None
+
     fig = plt.figure(figsize=(figsize[0], figsize[1] * 3))
     axes = [fig.add_subplot(3, 1, k + 1, projection='3d') for k in range(3)]
 
@@ -1146,6 +1153,7 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
         # Collect all patch projections (rotated) + colour values
         patch_projs  = []
         patch_colors = []
+        patch_seg_colors = []  # per-segment RGBA colors when input_color_map is used
         for trial, trial_periods in enumerate(periods):
             for start, end in trial_periods:
                 patch_obs = obs[start:end, trial, dim]
@@ -1153,7 +1161,14 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
                     continue
                 proj = pca.transform(hidden[start:end, trial, :])[:, :3] @ R.T
                 patch_projs.append(proj)
-                if color_signal is not None:
+                if input_color_map is not None:
+                    full_obs = obs[start:end, trial, :]          # (L, n_obs)
+                    dists = np.sum((full_obs[:, None, :] - _icm_arrays[None, :, :]) ** 2, axis=-1)
+                    best = np.argmin(dists, axis=-1)             # (L,)
+                    seg_colors = [_icm_colors[b] for b in best[:-1]]
+                    patch_seg_colors.append(seg_colors)
+                    patch_colors.append(np.zeros(len(proj)))     # placeholder
+                elif color_signal is not None:
                     patch_colors.append(color_signal[start:end, trial])
                 else:
                     patch_colors.append(np.arange(len(proj)))
@@ -1166,31 +1181,42 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
         if max_trajectories is not None:
             rng = np.random.default_rng(0)
             idx = rng.choice(len(patch_projs), size=min(max_trajectories, len(patch_projs)), replace=False)
-            patch_projs  = [patch_projs[i]  for i in idx]
-            patch_colors = [patch_colors[i] for i in idx]
+            patch_projs      = [patch_projs[i]      for i in idx]
+            patch_colors     = [patch_colors[i]     for i in idx]
+            if input_color_map is not None:
+                patch_seg_colors = [patch_seg_colors[i] for i in idx]
 
-        all_vals = np.concatenate([c.ravel() for c in patch_colors])
-        if color_by == 'reward_site_idx':
-            cmap = copy(_base_cmap)
-            cmap.set_under('black')
-            norm = Normalize(vmin=0, vmax=np.nanmax(all_vals))
+        if input_color_map is not None:
+            for proj, seg_colors in zip(patch_projs, patch_seg_colors):
+                pts  = proj.reshape(-1, 1, 3)
+                segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+                lc   = Line3DCollection(segs, linewidth=1, alpha=1)
+                lc.set_colors(seg_colors)
+                ax.add_collection3d(lc)
+            norm, cmap = None, None
         else:
-            cmap = _base_cmap
-            norm = Normalize(vmin=np.nanmin(all_vals), vmax=np.nanmax(all_vals))
+            all_vals = np.concatenate([c.ravel() for c in patch_colors])
+            if color_by == 'reward_site_idx':
+                cmap = copy(_base_cmap)
+                cmap.set_under('black')
+                norm = Normalize(vmin=0, vmax=np.nanmax(all_vals))
+            else:
+                cmap = _base_cmap
+                norm = Normalize(vmin=np.nanmin(all_vals), vmax=np.nanmax(all_vals))
 
-        for proj, cvals in zip(patch_projs, patch_colors):
-            pts  = proj.reshape(-1, 1, 3)
-            segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-            lc   = Line3DCollection(segs, cmap=cmap, norm=norm, linewidth=1, alpha=1)
-            lc.set_array(np.asarray(cvals[:-1]).ravel())
-            ax.add_collection3d(lc)
+            for proj, cvals in zip(patch_projs, patch_colors):
+                pts  = proj.reshape(-1, 1, 3)
+                segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+                lc   = Line3DCollection(segs, cmap=cmap, norm=norm, linewidth=1, alpha=1)
+                lc.set_array(np.asarray(cvals[:-1]).ravel())
+                ax.add_collection3d(lc)
 
         if global_lims is not None:
             ax.set_xlim(*global_lims[0])
             ax.set_ylim(*global_lims[1])
             ax.set_zlim(*global_lims[2])
 
-        _style_3d_ax(ax, norm, cmap, cbar_label, rotation=R)
+        _style_3d_ax(ax, norm, cmap, cbar_label, cbar=(input_color_map is None), rotation=R)
 
         # Re-apply after _style_3d_ax (autoscale_view may have overridden them)
         if global_lims is not None:
@@ -1208,6 +1234,9 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
             ax.set_zlim(*global_lims[2])
 
     plt.tight_layout()
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        fig.savefig(os.path.join(save_dir, 'patch_trajectories_3d.pdf'), bbox_inches='tight')
     return fig
 
 
@@ -1821,24 +1850,54 @@ def fit_remaining_time_decoder(traj_data):
     return w / np.linalg.norm(w)
 
 
-def collect_pre_odor_time_to_exit(traj_data, patch_num=None):
+def collect_pre_odor_time_to_exit(traj_data, patch_num=None, include_all_patch_states=False):
     """
     For every pre-odor onset state detected by find_pre_odor_onset_states, scan
     forward in the trajectory to find how many steps remain until the agent leaves
     the patch (in_patch == 0).  Events where no exit is observed are discarded.
 
+    If include_all_patch_states is True, instead collect *every* in-patch hidden
+    state (not just pre-odor onsets), each paired with its steps-to-exit.  When
+    patch_num is given, only states in patches of that type are included.
+
     Returns a dict:
-      hidden        (N, H) float — pre-odor hidden states
+      hidden        (N, H) float — hidden states
       time_to_exit  (N,)   float — steps from that state until patch exit
     """
-    events   = find_pre_odor_onset_states(traj_data, patch_num=patch_num)
-    if len(events['hidden']) == 0:
-        return dict(hidden=np.empty((0, 1)), time_to_exit=np.empty(0))
-
     _steps_per_env = 20000
     _n_envs = max(1, traj_data['observations'].shape[0] // _steps_per_env)
     obs_all  = traj_data['observations'].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)
     in_patch = obs_all[:, :, 0]   # (T, n_trials)
+
+    if include_all_patch_states:
+        hidden_all = traj_data['actor_hidden'].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)
+        patch_nums = (traj_data['current_patch_num']
+                      .reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)[:, :, 0])
+        T, n_trials = in_patch.shape
+
+        h_list, t_list = [], []
+        for trial in range(n_trials):
+            ip = in_patch[:, trial] > 0
+            padded = np.concatenate([[False], ip, [False]])
+            diff   = np.diff(padded.astype(int))
+            starts = np.where(diff ==  1)[0]
+            stops  = np.where(diff == -1)[0]
+            for s, e in zip(starts, stops):
+                if patch_num is not None and patch_nums[s, trial] != patch_num:
+                    continue
+                # steps-to-exit: e is first out-of-patch step, so state at t exits in (e - t)
+                h_list.append(hidden_all[s:e, trial])
+                t_list.append((e - np.arange(s, e)).astype(float))
+        if not h_list:
+            return dict(hidden=np.empty((0, hidden_all.shape[-1])), time_to_exit=np.empty(0))
+        return dict(
+            hidden       = np.concatenate(h_list, axis=0),
+            time_to_exit = np.concatenate(t_list, axis=0),
+        )
+
+    events   = find_pre_odor_onset_states(traj_data, patch_num=patch_num)
+    if len(events['hidden']) == 0:
+        return dict(hidden=np.empty((0, 1)), time_to_exit=np.empty(0))
 
     times = []
     valid = []
@@ -2957,6 +3016,9 @@ def plot_patch_progress_trajectories(traj_data, patch_types=(1, 2), n_traj=10,
             t_vis, pp_vis = t[~in_odor], pp[~in_odor]
             ax.plot(t_vis, pp_vis, color=color, alpha=0.6, lw=0.8)
             ax.scatter(t_vis, pp_vis, color=color, alpha=0.4, s=8, linewidths=0)
+            if len(t_vis) > 0:
+                ax.scatter(t_vis[0],  pp_vis[0],  marker='*', color='darkgreen', s=60, zorder=5)
+                ax.scatter(t_vis[-1], pp_vis[-1], marker='*', color='darkred',   s=60, zorder=5)
 
         ax.set_xlabel('Time within patch (steps)', fontsize=8)
         ax.set_ylim(0, 1.05)
@@ -3169,6 +3231,9 @@ def plot_patch_progress_trajectories_pc1(traj_data, patch_types=(1, 2), n_traj=1
             t_vis, proj_vis = t[~in_odor], proj[~in_odor]
             ax.plot(t_vis, proj_vis, color=color, alpha=0.6, lw=0.8)
             ax.scatter(t_vis, proj_vis, color=color, alpha=0.4, s=8, linewidths=0)
+            if len(t_vis) > 0:
+                ax.scatter(t_vis[0],  proj_vis[0],  marker='*', color='darkgreen', s=60, zorder=5)
+                ax.scatter(t_vis[-1], proj_vis[-1], marker='*', color='darkred',   s=60, zorder=5)
 
         ax.set_xlabel('Time within patch (steps)', fontsize=8)
         ax.set_title(f'Patch type {pt}', fontsize=8)
@@ -4296,6 +4361,35 @@ def plot_synthetic_in_pc_space(actor_hiddens, pca, pc_activities, color_by=None,
     plt.show()
 
 
+def _depth_alpha_lc3d(segs, base_colors, cam_elev, cam_azim, alpha_min=0.1, **kwargs):
+    """Line3DCollection with depth-sorted segments and depth-based alpha.
+
+    Robust to non-finite segment coordinates (e.g. diverging forward runs):
+    such segments get depth = -inf so they sort to the back and receive
+    alpha_min.
+    """
+    er, ar = np.radians(cam_elev), np.radians(cam_azim)
+    cam_dir = np.array([np.cos(er) * np.cos(ar), np.cos(er) * np.sin(ar), np.sin(er)])
+    depths = segs.mean(axis=1) @ cam_dir
+    finite = np.isfinite(depths)
+    depths = np.where(finite, depths, -np.inf)
+    order = np.argsort(depths)
+    d = depths[order]
+    finite_o = np.isfinite(d)
+    if finite_o.any() and (d[finite_o].max() - d[finite_o].min()) > 1e-10:
+        d_min, d_max = d[finite_o].min(), d[finite_o].max()
+        alpha = alpha_min + (1.0 - alpha_min) * (d - d_min) / (d_max - d_min)
+    else:
+        alpha = np.ones(len(segs))
+    alpha = np.clip(np.nan_to_num(alpha, nan=alpha_min, neginf=alpha_min, posinf=1.0),
+                    0.0, 1.0)
+    colors = np.clip(base_colors[order].copy(), 0.0, 1.0)
+    colors[:, 3] = alpha
+    lc = Line3DCollection(segs[order], **kwargs)
+    lc.set_colors(colors)
+    return lc
+
+
 # --- (from cell 6ad9a180) ---
 def plot_patch_segments_with_fixed_points(
     traj_data,
@@ -4320,6 +4414,8 @@ def plot_patch_segments_with_fixed_points(
     stop_after_unique_inputs=False,
     vmax_inputs=1,
     vmin_inputs=-1,
+    traj_cmap=None,
+    plot_current_segment=True,
 ):
     """Plot a single patch visit in 3D PC space, split by constant-input segments.
 
@@ -4407,7 +4503,7 @@ def plot_patch_segments_with_fixed_points(
           f'(global steps {pre_start}–{p_stop - 1}, length {T_patch})  '
           f'→ {len(segments)} segments with ≥{min_segment_len} steps')
 
-    cmap_traj = plt.cm.plasma
+    cmap_traj = traj_cmap if traj_cmap is not None else plt.cm.viridis
 
     # Load pre-computed points once if a path was provided
     preloaded_fps = None
@@ -4467,13 +4563,17 @@ def plot_patch_segments_with_fixed_points(
             if n_fps > 1:
                 fp_pr = participation_ratio(np.array(unique_fps))
 
-        # --- Figure: observation matrix (top) + two 3D PC plots (middle) + separatrix distance (bottom) ---
+        # --- Figure: obs | 3D | cbar_time | 3D | cbar_eig | sep_dist ---
         fig = plt.figure(figsize=figsize)
-        gs  = fig.add_gridspec(4, 1, height_ratios=[1, 6, 6, 1], hspace=0.4)
-        ax_obs  = fig.add_subplot(gs[0])
-        ax_3d   = fig.add_subplot(gs[1], projection='3d')
-        ax_3d2  = fig.add_subplot(gs[2], projection='3d')
-        ax_sep  = fig.add_subplot(gs[3])
+        gs  = fig.add_gridspec(6, 1,
+                               height_ratios=[1, 5, 0.15, 5, 0.15, 1],
+                               hspace=0.4)
+        ax_obs     = fig.add_subplot(gs[0])
+        ax_3d      = fig.add_subplot(gs[1], projection='3d')
+        ax_cb_time = fig.add_subplot(gs[2])
+        ax_3d2     = fig.add_subplot(gs[3], projection='3d')
+        ax_cb_eig  = fig.add_subplot(gs[4])
+        ax_sep     = fig.add_subplot(gs[5])
 
         # Top panel: full patch input matrix, channels x time
         im = ax_obs.imshow(
@@ -4519,9 +4619,9 @@ def plot_patch_segments_with_fixed_points(
         full_segs  = np.concatenate([full_pts[:-1], full_pts[1:]], axis=1)
         t_full     = np.arange(len(patch_proj) - 1, dtype=float)
         full_norm  = Normalize(vmin=0, vmax=len(patch_proj) - 1)
-        lc_full    = Line3DCollection(full_segs, cmap=plt.cm.viridis, norm=full_norm,
-                                      linewidth=1, alpha=0.4, zorder=1)
-        lc_full.set_array(t_full)
+        full_colors = cmap_traj(full_norm(t_full))
+        lc_full = _depth_alpha_lc3d(full_segs, full_colors, elev, azim,
+                                     linewidth=1, zorder=1)
         ax_3d.add_collection3d(lc_full)
 
         # Current segment coloured by side of separatrix
@@ -4537,13 +4637,14 @@ def plot_patch_segments_with_fixed_points(
 
         pts      = proj.reshape(-1, 1, 3)
         seg_segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-        lc = Line3DCollection(seg_segs, cmap=cmap_sep, norm=sep_norm,
-                              linewidth=2, alpha=0.9, zorder=2)
-        lc.set_array(scores[1:])
-        ax_3d.add_collection3d(lc)
+        if plot_current_segment:
+            seg_colors = cmap_sep(sep_norm(scores[1:]))
+            lc = _depth_alpha_lc3d(seg_segs, seg_colors, elev, azim,
+                                    alpha_min=0.3, linewidth=2, zorder=2)
+            ax_3d.add_collection3d(lc)
 
-        ax_3d.scatter(*proj[0],  s=120, color='green', marker='*', edgecolors='none', zorder=5)
-        ax_3d.scatter(*proj[-1], s=120, color='red',   marker='*', edgecolors='none', zorder=5)
+            ax_3d.scatter(*proj[0],  s=120, color='green', marker='*', edgecolors='none', zorder=5)
+            ax_3d.scatter(*proj[-1], s=120, color='red',   marker='*', edgecolors='none', zorder=5)
 
         fp_eigenvalues = None
         if n_fps > 0:
@@ -4564,11 +4665,6 @@ def plot_patch_segments_with_fixed_points(
                 ax_3d.scatter(fp_proj[:, 0], fp_proj[:, 1], fp_proj[:, 2],
                               s=80, marker='o', c=max_eigs, cmap=cmap_fp,
                               norm=fp_norm, edgecolors='k', linewidths=0.5, zorder=6)
-                sm_fp = plt.cm.ScalarMappable(cmap=cmap_fp, norm=fp_norm)
-                cb_fp = plt.colorbar(sm_fp, ax=ax_3d, label='max |eig|',
-                                     shrink=0.25, aspect=10, pad=0.12)
-                cb_fp.outline.set_visible(False)
-
         obs_str = ', '.join(f'{v:.2f}' for v in obs_vec)
         ax_3d.set_title(
             f'obs=[{obs_str}]  act={action_idx}  '
@@ -4580,17 +4676,32 @@ def plot_patch_segments_with_fixed_points(
         ax_3d.view_init(elev=elev, azim=azim)
         add_separatrix_plane(ax_3d, params, pca)
 
+        # Time colorbar in its own axis (narrowed to 30% width, centered)
+        sm_time = plt.cm.ScalarMappable(cmap=cmap_traj, norm=full_norm)
+        sm_time.set_array([])
+        pos_t = ax_cb_time.get_position()
+        shrink_t = 0.3
+        new_w_t = pos_t.width * shrink_t
+        ax_cb_time.set_position([pos_t.x0 + (pos_t.width - new_w_t) / 2, pos_t.y0,
+                                 new_w_t, pos_t.height])
+        cb_time = plt.colorbar(sm_time, cax=ax_cb_time, orientation='horizontal',
+                               label='Time in patch')
+        cb_time.outline.set_visible(False)
+        cb_time.ax.xaxis.label.set_size(9)
+        ax_cb_time.tick_params(labelsize=9)
+
         # Second 3D view
-        lc_full2 = Line3DCollection(full_segs, cmap=plt.cm.viridis, norm=full_norm,
-                                    linewidth=1, alpha=0.4, zorder=1)
-        lc_full2.set_array(t_full)
+        full_colors2 = cmap_traj(full_norm(t_full))
+        lc_full2 = _depth_alpha_lc3d(full_segs, full_colors2, elev2, azim2,
+                                      linewidth=1, zorder=1)
         ax_3d2.add_collection3d(lc_full2)
-        lc2 = Line3DCollection(seg_segs, cmap=cmap_sep, norm=sep_norm,
-                               linewidth=2, alpha=0.9, zorder=2)
-        lc2.set_array(scores[1:])
-        ax_3d2.add_collection3d(lc2)
-        ax_3d2.scatter(*proj[0],  s=120, color='green', marker='*', edgecolors='none', zorder=5)
-        ax_3d2.scatter(*proj[-1], s=120, color='red',   marker='*', edgecolors='none', zorder=5)
+        if plot_current_segment:
+            seg_colors2 = cmap_sep(sep_norm(scores[1:]))
+            lc2 = _depth_alpha_lc3d(seg_segs, seg_colors2, elev2, azim2,
+                                     alpha_min=0.3, linewidth=2, zorder=2)
+            ax_3d2.add_collection3d(lc2)
+            ax_3d2.scatter(*proj[0],  s=120, color='green', marker='*', edgecolors='none', zorder=5)
+            ax_3d2.scatter(*proj[-1], s=120, color='red',   marker='*', edgecolors='none', zorder=5)
         if n_fps > 0:
             if preloaded_fps is not None:
                 ax_3d2.scatter(fp_proj[:, 0], fp_proj[:, 1], fp_proj[:, 2],
@@ -4603,6 +4714,23 @@ def plot_patch_segments_with_fixed_points(
         _style_3d_ax(ax_3d2, sep_norm, cmap_sep, 'separatrix side', cbar=False)
         ax_3d2.view_init(elev=elev2, azim=azim2)
         add_separatrix_plane(ax_3d2, params, pca)
+
+        # Eigenvalue colorbar in its own axis (narrowed to 30% width, centered)
+        if fp_eigenvalues is not None:
+            sm_fp = plt.cm.ScalarMappable(cmap=cmap_fp, norm=fp_norm)
+            sm_fp.set_array([])
+            pos_e = ax_cb_eig.get_position()
+            shrink_e = 0.3
+            new_w_e = pos_e.width * shrink_e
+            ax_cb_eig.set_position([pos_e.x0 + (pos_e.width - new_w_e) / 2, pos_e.y0,
+                                    new_w_e, pos_e.height])
+            cb_eig = plt.colorbar(sm_fp, cax=ax_cb_eig, orientation='horizontal',
+                                  label='max |eig|')
+            cb_eig.outline.set_visible(False)
+            cb_eig.ax.xaxis.label.set_size(9)
+            ax_cb_eig.tick_params(labelsize=9)
+        else:
+            ax_cb_eig.set_visible(False)
 
         # Bottom panel: signed distance to separatrix across whole patch
         patch_scores = (patch_hidden @ w + b_diff) / w_norm   # (T_patch,)
@@ -4634,6 +4762,247 @@ def plot_patch_segments_with_fixed_points(
 
         if stop_after_unique_inputs and seen_inputs >= unique_inputs:
             break
+
+
+def plot_patch_segments_forward_runs(
+    traj_data,
+    params,
+    network,
+    pca,
+    trial_idx=0,
+    patch_idx=0,
+    n_states=200,
+    n_forward_steps=30,
+    use_self_action=False,
+    threshold=0.5,
+    figsize=(8, 14),
+    elev=20,
+    azim=30,
+    elev2=20,
+    azim2=120,
+    save_dir=None,
+    includes_actions_and_rewards=False,
+    patch_type=None,
+    traj_cmap=None,
+    seed=0,
+):
+    """For each unique input in a patch visit, plot forward runs from random states.
+
+    Like plot_patch_segments_with_fixed_points, but instead of fixed points it
+    drives ~n_states randomly-sampled hidden states forward under the (constant)
+    input for that segment and plots their 3D PC trajectories coloured by time.
+
+    For each unique network-input vector encountered in the patch, one figure is
+    produced with an input matrix (top, with matching segments highlighted) and
+    two 3D PC views of the forward runs.
+
+    Args:
+        traj_data:       Dict from load/parse, shape (n_envs*20000, ...) per field.
+        params:          Network parameters.
+        network:         A2CRNNFlax instance.
+        pca:             Fitted PCA used to project hidden states.
+        trial_idx:       Which env/trial to use.
+        patch_idx:       Which patch within the trial (0-indexed).
+        n_states:        Number of random initial states to run forward (~200).
+        n_forward_steps: Number of steps to simulate each state forward.
+        use_self_action: If True, feed the actor's own argmax action back as input.
+        threshold:       Obs[0] threshold for patch boundary detection.
+        traj_cmap:       Colormap for time (default viridis).
+        seed:            RNG seed for sampling initial states.
+    """
+    N_STEPS = 20000
+    n_total = traj_data['observations'].shape[0]
+    n_envs  = n_total // N_STEPS
+
+    n_obs = traj_data['observations'].reshape(n_envs, N_STEPS, -1).shape[-1]
+
+    # Build (n_envs, T, n_obs+2) network-input array: obs + action(2) + reward(1)
+    if includes_actions_and_rewards:
+        network_inputs = traj_data['observations'].reshape(n_envs, N_STEPS, -1)
+    else:
+        network_inputs = np.concatenate([
+            traj_data['observations'].reshape(n_envs, N_STEPS, -1),
+            jax.nn.one_hot(
+                traj_data['actions'].reshape(n_envs, N_STEPS, -1).squeeze(axis=-1),
+                num_classes=2,
+            ),
+            traj_data['rewards'].reshape(n_envs, N_STEPS, -1),
+        ], axis=-1)
+
+    obs    = traj_data['observations'].reshape(n_envs, N_STEPS, -1)[trial_idx]
+    inputs = network_inputs[trial_idx]
+
+    # Locate patch boundaries from visual cue (obs[:, 0])
+    in_patch = obs[:, 0] > threshold
+    padded   = np.concatenate([[False], in_patch, [False]])
+    diff     = np.diff(padded.astype(int))
+    starts   = np.where(diff ==  1)[0]
+    stops    = np.where(diff == -1)[0]
+
+    if patch_type is not None:
+        patch_nums = traj_data['current_patch_num'].reshape(n_envs, N_STEPS)[trial_idx]
+        mask = np.array([patch_nums[s] == patch_type for s in starts])
+        starts = starts[mask]
+        stops  = stops[mask]
+
+    if patch_idx >= len(starts):
+        label = f'patch_type={patch_type}' if patch_type is not None else f'trial {trial_idx}'
+        print(f'Only {len(starts)} patches for {label}; requested patch_idx={patch_idx}')
+        return
+
+    p_start, p_stop = starts[patch_idx], stops[patch_idx]
+    pre_start = max(0, p_start - 1)
+    patch_inputs = inputs[pre_start:p_stop]
+    T_patch = p_stop - pre_start
+    n_input_dims = patch_inputs.shape[1]
+
+    # Split patch into contiguous constant-input segments
+    changes   = np.any(patch_inputs[1:] != patch_inputs[:-1], axis=1)
+    seg_edges = np.concatenate([[0], np.where(changes)[0] + 1, [T_patch]])
+    segments  = [
+                    (int(seg_edges[i]), int(seg_edges[i + 1]))
+                    for i in range(len(seg_edges) - 1)
+                ]
+
+    # Unique inputs in order of first appearance, with all matching segments
+    unique_inputs = []        # list of input vectors
+    unique_segments = []      # list of [(s, e), ...] matching each unique input
+    for (s, e) in segments:
+        raw = patch_inputs[s]
+        match = None
+        for ui_idx, ui in enumerate(unique_inputs):
+            if np.array_equal(ui, raw):
+                match = ui_idx
+                break
+        if match is None:
+            unique_inputs.append(raw)
+            unique_segments.append([(s, e)])
+        else:
+            unique_segments[match].append((s, e))
+
+    print(f'Trial {trial_idx}, patch {patch_idx}  '
+          f'(global steps {pre_start}–{p_stop - 1}, length {T_patch})  '
+          f'→ {len(unique_inputs)} unique inputs')
+
+    cmap_traj = traj_cmap if traj_cmap is not None else plt.cm.viridis
+
+    # Sample a fixed random set of initial states (shared across inputs)
+    rng     = np.random.default_rng(seed)
+    n_avail = traj_data['actor_hidden'].shape[0]
+    sample_idx = rng.choice(n_avail, size=min(n_states, n_avail), replace=False)
+    h_inits = jnp.array(traj_data['actor_hidden'][sample_idx])
+
+    obs_end = n_obs - 3 if includes_actions_and_rewards else n_obs
+
+    for ui_idx, raw_input in enumerate(unique_inputs):
+        input_vec = jnp.array(raw_input)
+
+        # Decode obs/action/reward for the title
+        obs_vec = raw_input[:obs_end]
+        if includes_actions_and_rewards:
+            action_idx = int(np.argmax(raw_input[obs_end:obs_end + 2]))
+            reward_val = float(raw_input[obs_end + 2])
+        else:
+            action_idx = int(round(float(raw_input[obs_end])))
+            reward_val = float(raw_input[obs_end + 1])
+
+        # Run the sampled states forward under this constant input
+        trajs = run_states_forward(
+            h_inits, input_vec, params, network,
+            n_steps=n_forward_steps, use_self_action=use_self_action,
+            obs_size=obs_end, action_size=2,
+        )   # (n_steps, batch, H)
+        trajs = np.array(trajs)
+
+        # Project all forward trajectories to PCA space
+        flat_proj = pca.transform(trajs.reshape(-1, trajs.shape[-1]))[:, :3]
+        all_proj  = flat_proj.reshape(n_forward_steps, trajs.shape[1], 3)
+
+        time_norm = Normalize(vmin=0, vmax=n_forward_steps - 1)
+        t_vals    = np.arange(n_forward_steps - 1, dtype=float)
+
+        # --- Figure: obs matrix | 3D | cbar_time | 3D ---
+        fig = plt.figure(figsize=figsize)
+        gs  = fig.add_gridspec(4, 1, height_ratios=[1, 5, 0.15, 5], hspace=0.4)
+        ax_obs     = fig.add_subplot(gs[0])
+        ax_3d      = fig.add_subplot(gs[1], projection='3d')
+        ax_cb_time = fig.add_subplot(gs[2])
+        ax_3d2     = fig.add_subplot(gs[3], projection='3d')
+
+        # Top panel: full patch input matrix, channels x time
+        im = ax_obs.imshow(
+            patch_inputs.T,
+            aspect='auto', cmap='RdBu_r', vmin=-1, vmax=1,
+            interpolation='nearest',
+            extent=[-0.5, T_patch - 0.5, n_input_dims - 0.5, -0.5],
+        )
+        plt.colorbar(im, ax=ax_obs, label='value', fraction=0.03, pad=0.02)
+        ax_obs.set_xlabel('Time in patch', fontsize=7)
+        ax_obs.set_title(
+            f'Patch inputs — trial {trial_idx}, patch {patch_idx}  '
+            f'(unique input {ui_idx + 1}/{len(unique_inputs)} highlighted)',
+            fontsize=8,
+        )
+        format_plot(ax_obs)
+        for (s, e) in unique_segments[ui_idx]:
+            ax_obs.add_patch(Rectangle(
+                (s - 0.5, -0.5), e - s, n_input_dims,
+                linewidth=1.5, edgecolor='red', facecolor='red', alpha=0.15,
+            ))
+            ax_obs.add_patch(Rectangle(
+                (s - 0.5, -0.5), e - s, n_input_dims,
+                linewidth=1.5, edgecolor='red', facecolor='none',
+            ))
+
+        # Build per-trajectory segment arrays once
+        def _draw_forward(ax, cam_elev, cam_azim):
+            for b in range(all_proj.shape[1]):
+                pts  = all_proj[:, b, :].reshape(-1, 1, 3)
+                segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+                colors = cmap_traj(time_norm(t_vals))
+                lc = _depth_alpha_lc3d(segs, colors, cam_elev, cam_azim,
+                                       alpha_min=0.1, linewidth=0.8, zorder=2)
+                ax.add_collection3d(lc)
+            ax.scatter(all_proj[0, :, 0], all_proj[0, :, 1], all_proj[0, :, 2],
+                       s=6, color='green', alpha=0.5, zorder=3, depthshade=False)
+
+        obs_str = ', '.join(f'{v:.2f}' for v in obs_vec)
+        _draw_forward(ax_3d, elev, azim)
+        ax_3d.set_title(
+            f'obs=[{obs_str}]  act={action_idx}  rew={reward_val:.2f}  '
+            f'n_states={all_proj.shape[1]}',
+            fontsize=8,
+        )
+        _style_3d_ax(ax_3d, time_norm, cmap_traj, 'time', cbar=False)
+        ax_3d.view_init(elev=elev, azim=azim)
+        add_separatrix_plane(ax_3d, params, pca)
+
+        # Time colorbar in its own axis (narrowed to 30% width, centered)
+        sm_time = plt.cm.ScalarMappable(cmap=cmap_traj, norm=time_norm)
+        sm_time.set_array([])
+        pos_t = ax_cb_time.get_position()
+        new_w_t = pos_t.width * 0.3
+        ax_cb_time.set_position([pos_t.x0 + (pos_t.width - new_w_t) / 2, pos_t.y0,
+                                 new_w_t, pos_t.height])
+        cb_time = plt.colorbar(sm_time, cax=ax_cb_time, orientation='horizontal',
+                               label='Forward step')
+        cb_time.outline.set_visible(False)
+        cb_time.ax.xaxis.label.set_size(9)
+        ax_cb_time.tick_params(labelsize=9)
+
+        # Second 3D view
+        _draw_forward(ax_3d2, elev2, azim2)
+        _style_3d_ax(ax_3d2, time_norm, cmap_traj, 'time', cbar=False)
+        ax_3d2.view_init(elev=elev2, azim=azim2)
+        add_separatrix_plane(ax_3d2, params, pca)
+
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fname = f'trial{trial_idx}_patch{patch_idx}_input{ui_idx}_forward.pdf'
+            fig.savefig(os.path.join(save_dir, fname), bbox_inches='tight')
+
+        plt.show()
+
 
 def save_fixed_points_for_unique_inputs(
     traj_data,
@@ -5099,6 +5468,7 @@ def plot_reward_pattern_results(
     azim=30,
     figsize=(6, 5),
     tte_data=None,
+    precomputed=None,
 ):
     """Run the network forward on seq_batch and plot results.
 
@@ -5110,75 +5480,99 @@ def plot_reward_pattern_results(
         traj_data        : used to sample initial hidden states and fit PCA.
         pca              : pre-fit sklearn PCA; fitted from traj_data/hidden states if None.
         seed             : RNG seed for sampling initial states from traj_data.
+        precomputed      : optional dict with keys 'all_hidden', 'all_inputs',
+                           'exit_sites_flat', 'exit_times_flat' (and optionally
+                           'net_params') to skip the synthetic rollout and plot a
+                           rollout produced elsewhere (e.g. the real environment).
 
     Returns:
-        fig_matrix, fig_pca, fig_pp, fig_exit_stats, exit_sites
+        fig_matrix, fig_pca, fig_pca_pp, fig_pp, fig_sep, fig_exit_stats,
+        fig_obs, fig_tte, exit_sites
     """
     reward_patterns_X = np.array(reward_patterns_X, dtype=int)
     n_patterns, n_sites = reward_patterns_X.shape
     batch_size = n_initial_states * n_patterns
     T_max = seq_batch.shape[1]
 
-    if net_params is None:
-        restored   = checkpoints.restore_checkpoint(
-            ckpt_dir=Path(ckpt_path).resolve(), target=train_state)
-        net_params = restored.params
-
-    # Sample initial hidden states from pre-patch transitions
-    if traj_data is not None:
-        in_patch_flat = traj_data['agent_in_patch'].reshape(-1).astype(bool)
-        actor_flat    = traj_data['actor_hidden'].reshape(-1, hidden_size)
-        critic_flat   = traj_data['critic_hidden'].reshape(-1, hidden_size)
-        transitions   = (~in_patch_flat[:-1]) & in_patch_flat[1:]
-        pre_patch_idx = np.where(transitions)[0] + 2
-        rng     = np.random.default_rng(seed)
-        choices = rng.choice(len(pre_patch_idx), size=n_initial_states, replace=False)
-        init_actor  = actor_flat[pre_patch_idx[choices]]
-        init_critic = critic_flat[pre_patch_idx[choices]]
-        actor_hidden  = jnp.array(np.repeat(init_actor,  n_patterns, axis=0))
-        critic_hidden = jnp.array(np.repeat(init_critic, n_patterns, axis=0))
+    if precomputed is not None:
+        all_hidden      = precomputed['all_hidden']
+        all_inputs      = precomputed['all_inputs']
+        exit_sites_flat = precomputed['exit_sites_flat']
+        exit_times_flat = precomputed['exit_times_flat']
+        if net_params is None:
+            net_params = precomputed.get('net_params', None)
+        if net_params is None:
+            restored   = checkpoints.restore_checkpoint(
+                ckpt_dir=Path(ckpt_path).resolve(), target=train_state)
+            net_params = restored.params
     else:
-        actor_hidden  = jnp.zeros((batch_size, hidden_size))
-        critic_hidden = jnp.zeros((batch_size, hidden_size))
+        if net_params is None:
+            restored   = checkpoints.restore_checkpoint(
+                ckpt_dir=Path(ckpt_path).resolve(), target=train_state)
+            net_params = restored.params
 
-    last_actions = jnp.tile(jnp.array([0., 1.]), (batch_size, 1))
-    rng_key      = jax.random.key(0)
-    done_mask    = np.zeros(batch_size, dtype=bool)
+        # Sample initial hidden states from pre-patch transitions
+        if traj_data is not None:
+            in_patch_flat = traj_data['agent_in_patch'].reshape(-1).astype(bool)
+            actor_flat    = traj_data['actor_hidden'].reshape(-1, hidden_size)
+            critic_flat   = traj_data['critic_hidden'].reshape(-1, hidden_size)
+            transitions   = (~in_patch_flat[:-1]) & in_patch_flat[1:]
+            pre_patch_idx = np.where(transitions)[0]   # last out-of-patch step before entry
+            rng     = np.random.default_rng(seed)
+            choices = rng.choice(len(pre_patch_idx), size=n_initial_states, replace=False)
+            init_actor  = actor_flat[pre_patch_idx[choices]]
+            init_critic = critic_flat[pre_patch_idx[choices]]
+            actor_hidden  = jnp.array(np.repeat(init_actor,  n_patterns, axis=0))
+            critic_hidden = jnp.array(np.repeat(init_critic, n_patterns, axis=0))
+        else:
+            actor_hidden  = jnp.zeros((batch_size, hidden_size))
+            critic_hidden = jnp.zeros((batch_size, hidden_size))
 
-    all_hidden      = np.zeros((batch_size, T_max, hidden_size))
-    exit_sites_flat = np.full(batch_size, -1, dtype=int)
-    exit_times_flat = np.full(batch_size, T_max, dtype=int)
-    t = 0
+        last_actions = jnp.tile(jnp.array([0., 1.]), (batch_size, 1))
+        rng_key      = jax.random.key(0)
+        done_mask    = np.zeros(batch_size, dtype=bool)
 
-    for i in range(n_sites):
-        t0 = i * (odor_on + odor_off) + odor_offset
+        all_hidden      = np.zeros((batch_size, T_max, hidden_size))
+        all_inputs      = np.zeros((batch_size, T_max, seq_batch.shape[2]))
+        exit_sites_flat = np.full(batch_size, -1, dtype=int)
+        exit_times_flat = np.full(batch_size, T_max, dtype=int)
+        t = 0
 
-        while t < t0:
-            all_hidden[:, t, :] = np.array(actor_hidden)
-            rng_key, noise_key  = jax.random.split(rng_key)
-            x_batch = jnp.array(seq_batch[:, t, :]).at[:, 4:6].set(last_actions)
-            logits_batch, _, actor_hidden, critic_hidden, _, _, _ = network.apply(
-                net_params, x_batch, actor_hidden, critic_hidden,
-                rngs={'noise': noise_key})
-            last_actions = jax.nn.one_hot(jnp.argmax(logits_batch, axis=-1), 2)
-            t += 1
+        for i in range(n_sites):
+            t0 = i * (odor_on + odor_off) + odor_offset
 
-        stay_counts = np.zeros(batch_size, dtype=int)
-        for _ in range(odor_on):
-            all_hidden[:, t, :] = np.array(actor_hidden)
-            rng_key, noise_key  = jax.random.split(rng_key)
-            x_batch = jnp.array(seq_batch[:, t, :]).at[:, 4:6].set(last_actions)
-            logits_batch, _, actor_hidden, critic_hidden, _, _, _ = network.apply(
-                net_params, x_batch, actor_hidden, critic_hidden,
-                rngs={'noise': noise_key})
-            last_actions    = jax.nn.one_hot(jnp.argmax(logits_batch, axis=-1), 2)
-            stay_counts    += (np.array(jnp.argmax(logits_batch, axis=-1)) == 0).astype(int)
-            t += 1
+            while t < t0:
+                all_hidden[:, t, :] = np.array(actor_hidden)
+                rng_key, noise_key  = jax.random.split(rng_key)
+                x_batch = jnp.array(seq_batch[:, t, :]).at[:, 4:6].set(last_actions)
+                all_inputs[:, t, :] = np.array(x_batch)
+                rng_key, action_key = jax.random.split(rng_key)
+                logits_batch, _, actor_hidden, critic_hidden, _, _, _ = network.apply(
+                    net_params, x_batch, actor_hidden, critic_hidden,
+                    rngs={'noise': noise_key})
+                actions = jax.random.categorical(action_key, logits_batch, axis=-1)
+                last_actions = jax.nn.one_hot(actions, 2)
+                t += 1
 
-        newly_done = (~done_mask) & (stay_counts < n_stay_threshold)
-        exit_sites_flat[newly_done] = i
-        exit_times_flat[newly_done] = t
-        done_mask |= newly_done
+            stay_counts = np.zeros(batch_size, dtype=int)
+            for _ in range(odor_on):
+                all_hidden[:, t, :] = np.array(actor_hidden)
+                rng_key, noise_key  = jax.random.split(rng_key)
+                x_batch = jnp.array(seq_batch[:, t, :]).at[:, 4:6].set(last_actions)
+                all_inputs[:, t, :] = np.array(x_batch)
+                rng_key, action_key = jax.random.split(rng_key)
+                logits_batch, _, actor_hidden, critic_hidden, _, _, _ = network.apply(
+                    net_params, x_batch, actor_hidden, critic_hidden,
+                    rngs={'noise': noise_key})
+                actions = jax.random.categorical(action_key, logits_batch, axis=-1)
+                last_actions    = jax.nn.one_hot(actions, 2)
+                stay_counts    += (np.array(actions) == 0).astype(int)
+                t += 1
+            newly_done = (~done_mask) & (stay_counts < n_stay_threshold)
+
+            exit_sites_flat[newly_done] = i
+            exit_times_flat[newly_done] = t
+            done_mask |= newly_done
 
     exit_sites = exit_sites_flat.reshape(n_initial_states, n_patterns)
 
@@ -5300,6 +5694,60 @@ def plot_reward_pattern_results(
                               label='Time step', shrink=0.6, aspect=20)
         cb.outline.set_visible(False)
 
+    # --- 3D PCA figure coloured by patch progress ---
+    fig_pca_pp = None
+    if tte_data is not None:
+        from matplotlib.colors import LinearSegmentedColormap
+        cmap_ryg = LinearSegmentedColormap.from_list('ryg', ['red', 'gold', 'green'])
+        pp_norm  = Normalize(vmin=0, vmax=1)
+
+        fig_pca_pp = plt.figure(figsize=(figsize[0] * n_patterns, figsize[1] * n_initial_states))
+        axes_pca_pp = {}
+        for s_idx in range(n_initial_states):
+            for p_idx in range(n_patterns):
+                subplot_idx = s_idx * n_patterns + p_idx + 1
+                ax3 = fig_pca_pp.add_subplot(n_initial_states, n_patterns, subplot_idx, projection='3d')
+                axes_pca_pp[(s_idx, p_idx)] = ax3
+
+        for s_idx in range(n_initial_states):
+            for p_idx in range(n_patterns):
+                batch_idx = s_idx * n_patterns + p_idx
+                t_end  = exit_times_flat[batch_idx]
+                h_traj = all_hidden[batch_idx, :t_end]
+                proj   = pca.transform(h_traj)
+                pp_vals = patch_progress(h_traj, tte_data, n_neighbors=100).astype(float)
+                ax3 = axes_pca_pp[(s_idx, p_idx)]
+
+                segs = np.stack([proj[:-1], proj[1:]], axis=1)
+                lc = Line3DCollection(segs, cmap=cmap_ryg, norm=pp_norm,
+                                      linewidth=1.0, alpha=0.9)
+                lc.set_array(pp_vals[:-1])
+                ax3.add_collection3d(lc)
+                ax3.scatter(*proj[0], color='darkgreen', marker='*', s=40, zorder=5)
+                if exit_sites_flat[batch_idx] >= 0:
+                    ax3.scatter(*proj[-1], color='darkred', marker='*', s=40, zorder=5)
+
+                pattern_str = ''.join(str(v) for v in reward_patterns_X[p_idx])
+                exit_str    = f'exit@{exit_sites_flat[batch_idx]}' if exit_sites_flat[batch_idx] >= 0 else 'no exit'
+                ax3.set_title(f'P{p_idx}:{pattern_str[:6]}.. S{s_idx}\n{exit_str}', fontsize=6)
+                ax3.view_init(elev=elev, azim=azim)
+
+        for ax3 in axes_pca_pp.values():
+            ax3.set_axis_off()
+            ax3.set_xlim(xlim); ax3.set_ylim(ylim); ax3.set_zlim(zlim)
+            ax3.quiver(ox, oy, oz, xl, 0,  0,  **kw)
+            ax3.quiver(ox, oy, oz, 0,  yl, 0,  **kw)
+            ax3.quiver(ox, oy, oz, 0,  0,  zl, **kw)
+            add_separatrix_plane(ax3, net_params, pca)
+
+        sm_pp = plt.cm.ScalarMappable(cmap=cmap_ryg, norm=pp_norm)
+        sm_pp.set_array([])
+        for s_idx in range(n_initial_states):
+            row_axes = [axes_pca_pp[(s_idx, p)] for p in range(n_patterns)]
+            cb = fig_pca_pp.colorbar(sm_pp, ax=row_axes, pad=0.02,
+                                     label='Patch progress', shrink=0.6, aspect=20)
+            cb.outline.set_visible(False)
+
     # --- Pattern label helpers ---
     all_rewarded   = [np.all(reward_patterns_X[p] == 1) for p in range(n_patterns)]
     all_unrewarded = [np.all(reward_patterns_X[p] == 0) for p in range(n_patterns)]
@@ -5330,7 +5778,7 @@ def plot_reward_pattern_results(
             if ax_pp_ctx is None:
                 continue
 
-            # Shade time steps where any odor input (columns 1:4) is active
+            # Shade time steps where anytte_data odor input (columns 1:4) is active
             odor_active = seq_batch[p_idx, :, 1:4].max(axis=-1) > 0.5
             transitions = np.diff(odor_active.astype(int), prepend=0, append=0)
             for t_s, t_e in zip(np.where(transitions == 1)[0], np.where(transitions == -1)[0]):
@@ -5340,7 +5788,7 @@ def plot_reward_pattern_results(
                 batch_idx = s_idx * n_patterns + p_idx
                 t_end  = exit_times_flat[batch_idx]
                 h_traj = all_hidden[batch_idx, :t_end]
-                pp     = patch_progress(h_traj, tte_data)
+                pp     = patch_progress(h_traj, tte_data, n_neighbors=100)
                 ts     = np.arange(len(pp))
                 ax_pp_ctx.plot(ts, pp, color=col, linewidth=0.8, alpha=0.6,
                                label=label if s_idx == 0 else None)
@@ -5358,6 +5806,51 @@ def plot_reward_pattern_results(
                 ax_ctx.legend(seen.values(), seen.keys(), fontsize=7)
             format_plot(ax_ctx)
         fig_pp.tight_layout()
+
+    # --- Separatrix distance vs time (one trajectory per row) ---
+    kernel = np.array(net_params['params']['actor']['kernel'])   # (H, 2)
+    bias   = np.array(net_params['params']['actor']['bias'])     # (2,)
+    w_sep  = kernel[:, 0] - kernel[:, 1]
+    b_sep  = float(bias[0] - bias[1])
+    w_sep_norm = np.linalg.norm(w_sep)
+
+    fig_sep, axes_sep = plt.subplots(batch_size, 1, figsize=(16, 2.5 * batch_size),
+                                     sharex=True, squeeze=False)
+    axes_sep = axes_sep[:, 0]
+
+    for s_idx in range(n_initial_states):
+        for p_idx in range(n_patterns):
+            batch_idx = s_idx * n_patterns + p_idx
+            ax_sep_ctx = axes_sep[batch_idx]
+            col   = _pattern_color(p_idx)
+            label = _pattern_label(p_idx)
+
+            ax_sep_ctx.axhline(0, color='black', linewidth=1.0, linestyle='--')
+
+            # Shade time steps where any odor input (columns 1:4) is active
+            odor_active = seq_batch[p_idx, :, 1:4].max(axis=-1) > 0.5
+            transitions = np.diff(odor_active.astype(int), prepend=0, append=0)
+            for t_s, t_e in zip(np.where(transitions == 1)[0], np.where(transitions == -1)[0]):
+                ax_sep_ctx.axvspan(t_s, t_e, alpha=0.08, color='grey', zorder=0, linewidth=0)
+
+            t_end  = exit_times_flat[batch_idx]
+            h_traj = all_hidden[batch_idx, :t_end]
+            sep_d  = (h_traj @ w_sep + b_sep) / w_sep_norm
+            ts     = np.arange(len(sep_d))
+            ax_sep_ctx.scatter(ts, sep_d, color=col, s=24, alpha=0.7,
+                               edgecolors='none', zorder=3)
+            ax_sep_ctx.scatter(ts[0],  sep_d[0],  facecolors='none', edgecolors=col,
+                               s=40, linewidths=1.0, zorder=5)
+            if exit_sites_flat[batch_idx] >= 0:
+                ax_sep_ctx.scatter(ts[-1], sep_d[-1], color=col, s=40, zorder=5)
+
+            exit_str = f'exit@{exit_sites_flat[batch_idx]}' if exit_sites_flat[batch_idx] >= 0 else 'no exit'
+            ax_sep_ctx.set_title(f'{label}  S{s_idx}  {exit_str}', fontsize=8)
+            ax_sep_ctx.set_ylabel('Dist. from sep.', fontsize=8)
+            format_plot(ax_sep_ctx)
+
+    axes_sep[-1].set_xlabel('Time step', fontsize=8)
+    fig_sep.tight_layout()
 
     # --- Bar chart: mean sites before opt-out ---
     sites_before_exit = np.where(exit_sites >= 0, exit_sites, n_sites).astype(float)
@@ -5377,7 +5870,74 @@ def plot_reward_pattern_results(
     format_plot(ax_bar)
     fig_exit_stats.tight_layout()
 
-    return fig_matrix, fig_pca, fig_pp, fig_exit_stats, exit_sites
+    # --- Observation inputs figure ---
+    input_dim = seq_batch.shape[2]
+    obs_channels = list(range(min(input_dim, 4)))
+    channel_labels = {i: f'obs {i}' for i in obs_channels}
+    channel_labels[4] = 'stay action'
+    channel_labels[5] = 'go action'
+    if input_dim > 6:
+        channel_labels[6] = 'reward'
+    plot_channels = obs_channels + [c for c in [4, 5, 6] if c < input_dim]
+    n_channels = len(plot_channels)
+
+    fig_obs, axes_obs = plt.subplots(
+        n_initial_states, n_patterns,
+        figsize=(max(4, 3 * n_patterns), 2 * n_initial_states),
+        squeeze=False, sharex=False, sharey=True,
+    )
+    for s_idx in range(n_initial_states):
+        for p_idx in range(n_patterns):
+            batch_idx = s_idx * n_patterns + p_idx
+            ax = axes_obs[s_idx, p_idx]
+            t_end = exit_times_flat[batch_idx]        # clip at opt-out
+            t_start = max(0, t_end - 50)              # last 50 steps before opt-out
+            inputs = all_inputs[batch_idx, t_start:t_end, :][:, plot_channels]
+            ax.imshow(inputs.T, aspect='auto', cmap='viridis',
+                      vmin=0, vmax=1, interpolation='nearest',
+                      extent=[t_start - 0.5, t_end - 0.5, n_channels - 0.5, -0.5])
+            ax.set_xlim(t_start - 0.5, t_end - 0.5)
+            pattern_str = ''.join(str(v) for v in reward_patterns_X[p_idx])
+            exit_str = f'exit@{exit_sites_flat[batch_idx]}' if exit_sites_flat[batch_idx] >= 0 else 'no exit'
+            ax.set_title(f'P{p_idx}:{pattern_str[:8]}.. S{s_idx} {exit_str}', fontsize=6)
+            ax.tick_params(labelsize=6)
+            ax.set_yticks(range(n_channels))
+            ax.set_yticklabels([channel_labels[ch] for ch in plot_channels], fontsize=5)
+    for ax in axes_obs[-1, :]:
+        ax.set_xlabel('Time step', fontsize=7)
+    fig_obs.tight_layout()
+
+    # --- 3D scatter of tte_data reference states coloured by time to exit ---
+    fig_tte = None
+    if tte_data is not None and len(tte_data['time_to_exit']) > 0:
+        from matplotlib.colors import LinearSegmentedColormap
+        cmap_ryg_tte = LinearSegmentedColormap.from_list('ryg', ['green', 'gold', 'red'])
+        tte_proj = pca.transform(tte_data['hidden'])[:, :3]
+        tte_vals = tte_data['time_to_exit']
+        tte_norm = Normalize(vmin=np.nanmin(tte_vals), vmax=np.nanmax(tte_vals))
+
+        fig_tte = plt.figure(figsize=figsize)
+        ax_tte = fig_tte.add_subplot(111, projection='3d')
+        ax_tte.view_init(elev=elev, azim=azim)
+        ax_tte.scatter(tte_proj[:, 0], tte_proj[:, 1], tte_proj[:, 2],
+                       c=tte_vals, cmap=cmap_ryg_tte, norm=tte_norm,
+                       s=4, alpha=0.6, depthshade=False)
+
+        ax_tte.set_xlim(xlim); ax_tte.set_ylim(ylim); ax_tte.set_zlim(zlim)
+        ax_tte.set_axis_off()
+        ax_tte.quiver(ox, oy, oz, xl, 0, 0, **kw)
+        ax_tte.quiver(ox, oy, oz, 0, yl, 0, **kw)
+        ax_tte.quiver(ox, oy, oz, 0, 0, zl, **kw)
+        add_separatrix_plane(ax_tte, net_params, pca)
+
+        sm_tte = plt.cm.ScalarMappable(cmap=cmap_ryg_tte, norm=tte_norm)
+        sm_tte.set_array([])
+        cb_tte = fig_tte.colorbar(sm_tte, ax=ax_tte, label='Time to exit',
+                                  shrink=0.6, aspect=20)
+        cb_tte.outline.set_visible(False)
+        fig_tte.tight_layout()
+
+    return fig_matrix, fig_pca, fig_pca_pp, fig_pp, fig_sep, fig_exit_stats, fig_obs, fig_tte, exit_sites
 
 
 def run_specified_reward_patterns_pca(
@@ -5418,6 +5978,178 @@ def run_specified_reward_patterns_pca(
         hidden_size=hidden_size, n_stay_threshold=n_stay_threshold,
         n_initial_states=n_initial_states, seed=seed,
         elev=elev, azim=azim, figsize=figsize, tte_data=tte_data,
+    )
+
+
+def run_specified_reward_patterns_env_pca(
+    reward_patterns_X,
+    ckpt_path,
+    train_state,
+    network,
+    net_params=None,
+    traj_data=None,
+    pca=None,
+    env_params=None,
+    input_dim=7,
+    hidden_size=64,
+    n_initial_states=1,
+    max_steps=400,
+    initial_patch_type=2,
+    seed=0,
+    elev=20,
+    azim=30,
+    figsize=(6, 5),
+    tte_data=None,
+):
+    """Like run_specified_reward_patterns_pca, but drive the agent through the
+    real treadmill environment (treadmill_env_jax) instead of a synthetic input
+    sequence.  The environment logic (odor sites, dwell-to-attempt, patch
+    structure) is used as-is; only the reward the agent perceives is overridden
+    so that attempting reward site k delivers reward = reward_patterns_X[p, k].
+
+    Each (initial state, pattern) is run through a single patch: the rollout for
+    a given element ends when the agent leaves the patch it first entered.
+
+    Args:
+        reward_patterns_X: (n_patterns, n_sites) int array of 0/1 rewards per site.
+        env_params       : TreadmillEnvParams; defaults to treadmill_session_default_params().
+        n_initial_states : number of sampled initial hidden states per pattern.
+        max_steps        : maximum env steps per rollout.
+        initial_patch_type: if not None, force the agent's first patch to this
+            odor type (0/1/2) by rejection-sampling env reset keys.
+        traj_data        : used to sample initial hidden states and fit PCA.
+
+    Returns:
+        Same tuple as plot_reward_pattern_results.
+    """
+    from environments.treadmill_env_jax import (
+        TreadmillEnvironment, treadmill_session_default_params)
+
+    reward_patterns_X = np.array(reward_patterns_X, dtype=int)
+    n_patterns, n_sites = reward_patterns_X.shape
+    batch_size = n_initial_states * n_patterns
+
+    if net_params is None:
+        restored = checkpoints.restore_checkpoint(
+            ckpt_dir=Path(ckpt_path).resolve(), target=train_state)
+        net_params = restored.params
+
+    if env_params is None:
+        env_params = treadmill_session_default_params()
+    reset, step, _ = TreadmillEnvironment()
+
+    # Per-batch reward pattern; batch order is0_p0, is0_p1, ..., is1_p0, ...
+    reward_pattern_batch = np.tile(reward_patterns_X, (n_initial_states, 1))   # (batch, n_sites)
+
+    # Env reset — shared key per initial state across patterns so the patch
+    # layout (type, site spacing) matches across patterns until behaviour diverges.
+    base_key = jax.random.key(seed)
+    if initial_patch_type is None:
+        is_keys = jax.random.split(base_key, n_initial_states)
+    else:
+        # Rejection-sample reset keys whose first patch is initial_patch_type.
+        pool_factor = 64
+        pool_keys   = jax.random.split(base_key, n_initial_states * pool_factor)
+        _, pool_state = jax.vmap(reset, in_axes=(0, None))(pool_keys, env_params)
+        pool_ptype = np.array(pool_state.current_patch_num)
+        match = np.where(pool_ptype == initial_patch_type)[0]
+        if len(match) < n_initial_states:
+            raise ValueError(
+                f'Only {len(match)} of {len(pool_keys)} resets gave patch type '
+                f'{initial_patch_type}; increase pool_factor.')
+        is_keys = pool_keys[jnp.asarray(match[:n_initial_states])]
+    reset_keys = jnp.repeat(is_keys, n_patterns, axis=0)
+    obs, env_state = jax.vmap(reset, in_axes=(0, None))(reset_keys, env_params)
+    obs = np.array(obs)
+
+    # Sample initial hidden states from pre-patch transitions (as in the synthetic fn)
+    if traj_data is not None:
+        in_patch_flat = traj_data['agent_in_patch'].reshape(-1).astype(bool)
+        actor_flat    = traj_data['actor_hidden'].reshape(-1, hidden_size)
+        critic_flat   = traj_data['critic_hidden'].reshape(-1, hidden_size)
+        transitions   = (~in_patch_flat[:-1]) & in_patch_flat[1:]
+        pre_patch_idx = np.where(transitions)[0]   # last out-of-patch step before entry
+        rng     = np.random.default_rng(seed)
+        choices = rng.choice(len(pre_patch_idx), size=n_initial_states, replace=False)
+        actor_hidden  = jnp.array(np.repeat(actor_flat[pre_patch_idx[choices]],  n_patterns, axis=0))
+        critic_hidden = jnp.array(np.repeat(critic_flat[pre_patch_idx[choices]], n_patterns, axis=0))
+    else:
+        actor_hidden  = jnp.zeros((batch_size, hidden_size))
+        critic_hidden = jnp.zeros((batch_size, hidden_size))
+
+    last_actions = jnp.tile(jnp.array([0., 1.]), (batch_size, 1))   # prev action one-hot (stay, go)
+    prev_reward  = np.zeros(batch_size)
+    rng_key      = jax.random.key(seed + 1)
+
+    all_hidden      = np.zeros((batch_size, max_steps, hidden_size))
+    all_inputs      = np.zeros((batch_size, max_steps, input_dim))
+    done_mask       = np.zeros(batch_size, dtype=bool)
+    has_entered     = np.zeros(batch_size, dtype=bool)
+    prev_attempted  = np.zeros(batch_size, dtype=bool)
+    sites_attempted = np.zeros(batch_size, dtype=int)
+    exit_sites_flat = np.full(batch_size, -1, dtype=int)
+    exit_times_flat = np.full(batch_size, max_steps, dtype=int)
+    arange_b = np.arange(batch_size)
+
+    for t in range(max_steps):
+        # Agent input: [obs(obs_size), prev_action_onehot(2), prev_reward(1)]
+        x_batch = np.concatenate([obs, np.array(last_actions), prev_reward[:, None]], axis=1)
+        all_inputs[:, t, :] = x_batch[:, :input_dim]
+        all_hidden[:, t, :] = np.array(actor_hidden)
+
+        rng_key, noise_key, action_key = jax.random.split(rng_key, 3)
+        logits_batch, _, actor_hidden, critic_hidden, _, _, _ = network.apply(
+            net_params, jnp.array(x_batch), actor_hidden, critic_hidden,
+            rngs={'noise': noise_key})
+        actions = jax.random.categorical(action_key, logits_batch, axis=-1)
+        last_actions = jax.nn.one_hot(actions, 2)
+
+        # Step the environment
+        rng_key, step_key = jax.random.split(rng_key)
+        step_keys = jax.random.split(step_key, batch_size)
+        obs_j, env_state, _, _, info = jax.vmap(step, in_axes=(0, 0, 0, None))(
+            step_keys, env_state, actions, env_params)
+        obs = np.array(obs_j)
+
+        # Override reward: at the rising edge of current_reward_site_attempted,
+        # deliver the pattern's reward for the current within-patch site index.
+        attempted   = np.array(info['current_reward_site_attempted']).astype(bool)
+        site_idx    = np.array(info['reward_site_idx']).astype(int)
+        new_attempt = attempted & (~prev_attempted) & (site_idx >= 0)
+        prev_attempted = attempted
+        site_clip  = np.clip(site_idx, 0, n_sites - 1)
+        pat_r      = reward_pattern_batch[arange_b, site_clip].astype(float)
+        prev_reward = np.where(new_attempt & (site_idx < n_sites) & (~done_mask), pat_r, 0.0)
+        sites_attempted += (new_attempt & (~done_mask)).astype(int)
+
+        # Track first patch entry/exit; end the rollout when the agent leaves it
+        in_patch    = np.array(info['agent_in_patch']).astype(bool)
+        has_entered |= in_patch
+        just_exited = has_entered & (~in_patch) & (~done_mask)
+        exit_sites_flat[just_exited] = sites_attempted[just_exited]
+        exit_times_flat[just_exited] = t + 1
+        done_mask |= just_exited
+
+        if done_mask.all():
+            break
+
+    # Trim to the longest used trajectory
+    T_used = int(np.max(np.where(exit_times_flat < max_steps, exit_times_flat, 0)))
+    T_used = min(max(T_used, 1), max_steps)
+    all_hidden = all_hidden[:, :T_used, :]
+    all_inputs = all_inputs[:, :T_used, :]
+    exit_times_flat = np.minimum(exit_times_flat, T_used)
+
+    return plot_reward_pattern_results(
+        all_inputs, reward_patterns_X, network, ckpt_path, train_state,
+        net_params=net_params, traj_data=traj_data, pca=pca,
+        hidden_size=hidden_size, n_initial_states=n_initial_states, seed=seed,
+        elev=elev, azim=azim, figsize=figsize, tte_data=tte_data,
+        precomputed=dict(
+            all_hidden=all_hidden, all_inputs=all_inputs,
+            exit_sites_flat=exit_sites_flat, exit_times_flat=exit_times_flat,
+            net_params=net_params,
+        ),
     )
 
 
