@@ -576,8 +576,14 @@ def plot_patch_statistics_across_dfs(dfs, figsize=(5, 3), xticks=None, xticklabe
             0.0,
         )
 
+        stops_per_patch = (
+            df.groupby(['session_number', 'patch_number', 'patch_type'])['stopped']
+            .sum().reset_index().rename(columns={'stopped': 'total_stops'})
+        )
+
         for pt in patch_types:
             pt_df = patch_df[patch_df['patch_type'] == pt]
+            pt_stops = stops_per_patch[stops_per_patch['patch_type'] == pt]
             records.append({
                 'df_idx':           df_idx,
                 'patch_type':       pt,
@@ -585,6 +591,8 @@ def plot_patch_statistics_across_dfs(dfs, figsize=(5, 3), xticks=None, xticklabe
                 'sem_rewards':      pt_df['rewards_collected'].sem(),
                 'mean_reward_prob': pt_df['reward_prob'].mean(),
                 'sem_reward_prob':  pt_df['reward_prob'].sem(),
+                'mean_stops':       pt_stops['total_stops'].mean(),
+                'sem_stops':        pt_stops['total_stops'].sem(),
             })
 
     agg = pd.DataFrame(records)
@@ -592,6 +600,7 @@ def plot_patch_statistics_across_dfs(dfs, figsize=(5, 3), xticks=None, xticklabe
 
     fig1, ax1 = plt.subplots(figsize=figsize)
     fig2, ax2 = plt.subplots(figsize=figsize)
+    fig3, ax3 = plt.subplots(figsize=figsize)
 
     for pt in patch_types:
         pt_df = agg[agg['patch_type'] == pt].sort_values('df_idx')
@@ -602,8 +611,11 @@ def plot_patch_statistics_across_dfs(dfs, figsize=(5, 3), xticks=None, xticklabe
         ax2.errorbar(pt_df['df_idx'], pt_df['mean_reward_prob'], yerr=pt_df['sem_reward_prob'],
                      color=color, lw=1.2, marker='o', markersize=3,
                      capsize=2, capthick=0.8, elinewidth=0.8, label=f'Type {pt}')
+        ax3.errorbar(pt_df['df_idx'], pt_df['mean_stops'], yerr=pt_df['sem_stops'],
+                     color=color, lw=1.2, marker='o', markersize=3,
+                     capsize=2, capthick=0.8, elinewidth=0.8, label=f'Type {pt}')
 
-    for ax in (ax1, ax2):
+    for ax in (ax1, ax2, ax3):
         if xticks is not None:
             ax.set_xticks(xticks)
         if xticklabels is not None:
@@ -623,7 +635,14 @@ def plot_patch_statistics_across_dfs(dfs, figsize=(5, 3), xticks=None, xticklabe
     format_plot(ax2)
     fig2.tight_layout()
 
-    return fig1, ax1, fig2, ax2
+    ax3.set_xlabel('Network index', fontsize=8)
+    ax3.set_ylabel('Mean stops per patch', fontsize=8)
+    ax3.legend(fontsize=7, frameon=False)
+    sns.despine(ax=ax3)
+    format_plot(ax3)
+    fig3.tight_layout()
+
+    return fig1, ax1, fig2, ax2, fig3, ax3
 
 
 def plot_first_patch_rewards_vs_other_prefactors(df, first_patch_type=None, figsize=(4, 3.5)):
@@ -910,34 +929,102 @@ def plot_multi_df_accuracy_heatmap(odor_site_dfs, predictors, df_labels=None, fi
 
 
 def plot_leave_probabilities(odor_site_dfs, predictors, dataset_labels=None,
-                             x_labels=None):
+                             x_labels=None, cmap=None):
     """Leave (stop) probability vs. each predictor for multiple datasets.
 
     x_labels : optional list of x-axis label strings, one per predictor.
                 Falls back to the predictor name (underscores replaced) if None.
+    cmap     : optional matplotlib colormap (name or Colormap). If given, each
+                dataframe is colored by its position in odor_site_dfs (first ->
+                low end, last -> high end of the colormap) and a colorbar is
+                rendered on each plot. If None, matplotlib's default color cycle
+                is used.
     """
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+
     scale = 0.5
     if dataset_labels is None:
         dataset_labels = [f'Dataset {i+1}' for i in range(len(odor_site_dfs))]
     if x_labels is None:
         x_labels = [p.replace('_', ' ') for p in predictors]
 
+    n_dfs = len(odor_site_dfs)
+    if cmap is not None:
+        cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+        norm = Normalize(vmin=0, vmax=max(n_dfs - 1, 1))
+        colors = [cmap_obj(norm(i)) for i in range(n_dfs)]
+    else:
+        colors = [None] * n_dfs
+
     for predictor, x_label in zip(predictors, x_labels):
-        fig, ax = plt.subplots(1, 1, figsize=(scale * 7, scale * 4), constrained_layout=True)
-        for df, label in zip(odor_site_dfs, dataset_labels):
+        fig, ax = plt.subplots(1, 1, figsize=(scale * 9, scale * 4), constrained_layout=True)
+        for df, label, color in zip(odor_site_dfs, dataset_labels, colors):
             agg  = df.groupby(predictor)['stopped'].agg(['sum', 'count'])
             k, n = agg['sum'].values, agg['count'].values
             p    = k / n
             ci   = clopper_pearson(k, n)
             yerr = np.array([p - ci[0], ci[1] - p])
             x    = agg.index.values
-            ax.errorbar(x, p, yerr=yerr, label=label,
+            ax.errorbar(x, p, yerr=yerr, label=label, color=color,
                         fmt='o-', ms=3, lw=0.8, elinewidth=0.8, capsize=2)
         ax.set_ylabel('Stay probability', fontsize=11)
         ax.set_xlabel(x_label, fontsize=11)
         format_plot(ax)
-    fig.tight_layout()
+        if cmap is not None:
+            sm = ScalarMappable(cmap=cmap_obj, norm=norm)
+            sm.set_array([])
+            cb = fig.colorbar(sm, ax=ax, label='Dataset')
+            cb.outline.set_visible(False)
     plt.show()
+
+
+def plot_stay_prob_distance_difference(odor_site_dfs, dist_col='dist_last_odor_site',
+                                       low_val=1, high_val=5, x_vals=None,
+                                       figsize=(4, 3)):
+    """Difference in stay probability between two `dist_last_odor_site` values,
+    plotted across networks.
+
+    For each df in `odor_site_dfs`, computes the stay probability (mean of the
+    'stopped' column) at dist_last_odor_site == low_val and == high_val, then
+    plots their difference P(stay | low_val) - P(stay | high_val).
+
+    x_vals : optional x-axis values (one per df); defaults to the df number.
+
+    Uncertainty is propagated treating each stay probability as a binomial
+    proportion p = k/n with variance p(1-p)/n; since the two distances draw on
+    disjoint sites, the difference's standard error is
+    sqrt(p_low(1-p_low)/n_low + p_high(1-p_high)/n_high).
+
+    Returns (fig, diffs, errs) with the per-df difference and its standard error.
+    """
+    def prop_and_n(df, v):
+        sub = df[df[dist_col] == v]['stopped']
+        n = len(sub)
+        return (sub.mean(), n) if n > 0 else (np.nan, 0)
+
+    diffs, errs = [], []
+    for df in odor_site_dfs:
+        p_lo, n_lo = prop_and_n(df, low_val)
+        p_hi, n_hi = prop_and_n(df, high_val)
+        diffs.append(p_lo - p_hi)
+        if n_lo > 0 and n_hi > 0:
+            errs.append(np.sqrt(p_lo * (1 - p_lo) / n_lo + p_hi * (1 - p_hi) / n_hi))
+        else:
+            errs.append(np.nan)
+    diffs = np.array(diffs)
+    errs  = np.array(errs)
+    x = np.arange(len(odor_site_dfs)) if x_vals is None else np.asarray(x_vals)
+
+    fig, ax = plt.subplots(figsize=figsize, constrained_layout=True)
+    ax.axhline(0, color='gray', lw=0.8, ls='--', alpha=0.6)
+    ax.errorbar(x, diffs, yerr=errs, fmt='o', ms=4, ls='none', color='steelblue',
+                elinewidth=0.8, capsize=2)
+    ax.set_xlabel('Session', fontsize=11)
+    ax.set_ylabel(f'$\\Delta$ stay prob (dist={low_val} $-$ dist={high_val})', fontsize=11)
+    format_plot(ax)
+    plt.show()
+    return fig, diffs, errs
 
 
 def plot_rewards_vs_interpatch_distance(odor_site_dfs, dataset_labels=None):
@@ -1028,8 +1115,12 @@ def plot_grouped_mean_std(df, x_col, hue_col, feature, dataset_col='dataset'):
 
 def plot_stop_fraction(df, x_col, y_col, condition=None, invert_y=True,
                        figsize=(5, 5), reverse=False, label=None, cmap='YlGnBu',
-                       xlabel=None, ylabel=None, high_res_save=False, min_n=1):
-    """Heatmap of P(stop) over two columns in df."""
+                       xlabel=None, ylabel=None, high_res_save=False, min_n=1,
+                       vmin=0, vmax=1):
+    """Heatmap of P(stop) over two columns in df.
+
+    vmin, vmax : lower/upper probability bounds for the colormap.
+    """
     if condition is not None:
         df = condition(df)
 
@@ -1046,7 +1137,7 @@ def plot_stop_fraction(df, x_col, y_col, condition=None, invert_y=True,
     if label is None:
         label = 'P(leave)'
     sns.heatmap(1 - heatmap_data if reverse else heatmap_data,
-                cmap=cmap, vmin=0, vmax=1,
+                cmap=cmap, vmin=vmin, vmax=vmax,
                 cbar_kws={'label': label}, ax=ax)
 
     ax.set_xlabel(xlabel if xlabel is not None else x_col.replace('_', ' '))

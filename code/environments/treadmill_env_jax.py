@@ -39,6 +39,7 @@ class TreadmillEnvState:
     step_count: int
     reward_params: jnp.ndarray
     reward_prob_prefactors: jnp.ndarray
+    patch_active_transition_probs: jnp.ndarray  # per patch type; resampled per session at reset
 
 
 @struct.dataclass
@@ -66,7 +67,10 @@ class TreadmillEnvParams:
     reward_site_len: int = 3
     obs_noise_std: float = 0
     reward_func_type: int = 0
-    patch_active_transition_prob: float = 0.90
+    patch_active_transition_prob: float = 0.90  # deprecated: superseded by patch_active_transition_prob_range
+    # [lo, hi] range; the per-session value is resampled uniformly from it at reset
+    patch_active_transition_prob_range: jnp.ndarray = struct.field(
+        default_factory=lambda: jnp.array([0.9, 0.9]))
     fixed_patches: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0, 0, 0]))
 
 
@@ -92,6 +96,7 @@ def treadmill_session_default_params() -> TreadmillEnvParams:
         reward_prob_prefactors=reward_prob_prefactors,
         reward_decay_range=jnp.array([0.0, 40.0]),
         reward_prob_range=jnp.array([0.0, 1.0]),
+        patch_active_transition_prob_range=jnp.array([0.9, 0.9]),
         interreward_len_bounds=jnp.array([1.0, 6.0]),
         interreward_len_decay_rate=0.8,
         interpatch_len_bounds=jnp.array([1.0, 12.0]),
@@ -115,7 +120,7 @@ def TreadmillEnvironment():
     ) -> Tuple[jnp.ndarray, TreadmillEnvState]:
         """Reset the environment - equivalent to start_new_session()"""
             
-        key, subkey1, subkey2, subkey3, subkey4, subkey_reward_param = random.split(key, 6)
+        key, subkey1, subkey2, subkey3, subkey4, subkey_reward_param, subkey_patp = random.split(key, 7)
 
         def old_reward_params(key, params):
             return params.reward_decay_consts, params.reward_prob_prefactors
@@ -167,6 +172,14 @@ def TreadmillEnvironment():
             params,
         )
 
+        # Resample a patch-active transition probability per patch type for this session
+        n_patch_types = params.reward_prob_prefactors.shape[0]
+        patch_active_transition_probs = random.uniform(
+            subkey_patp, (n_patch_types,),
+            minval=params.patch_active_transition_prob_range[0],
+            maxval=params.patch_active_transition_prob_range[1],
+        )
+
         # Initialize patch number and position
         current_patch_num = random.randint(subkey1, (), 0, params.num_patch_types)
         current_position = jnp.array(0.0)
@@ -189,9 +202,10 @@ def TreadmillEnvironment():
             step_count=jnp.array(0),
             reward_params=new_reward_params,
             reward_prob_prefactors=new_reward_prob_prefactors,
+            patch_active_transition_probs=patch_active_transition_probs,
             exp_filtered_reward_rate=jnp.array(0.0),
         )
-        
+
         obs = get_observations(subkey4, state, params)
         return obs, state
 
@@ -277,7 +291,7 @@ def TreadmillEnvironment():
 
                     patch_active = jnp.where(
                         s.current_patch.active,
-                        random.bernoulli(transition_key, params.patch_active_transition_prob).astype(bool),
+                        random.bernoulli(transition_key, s.patch_active_transition_probs[s.current_patch.odor_num]).astype(bool),
                         False,
                     )
 

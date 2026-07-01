@@ -4463,6 +4463,8 @@ def plot_patch_segments_with_fixed_points(
     points_path=None,
     patch_type=None,
     stop_after_unique_inputs=False,
+    round_inputs_for_uniqueness=False,
+    target_inputs=None,
     vmax_inputs=1,
     vmin_inputs=-1,
     traj_cmap=None,
@@ -4562,16 +4564,35 @@ def plot_patch_segments_with_fixed_points(
         with open(points_path, 'rb') as _f:
             preloaded_fps = jnp.array(pickle.load(_f))
 
+    def _uniqueness_key(inp):
+        if round_inputs_for_uniqueness:
+            return tuple(np.clip(np.round(inp), 0, 1))
+        return tuple(inp)
+
+    def _rounded_key(inp):
+        return tuple(np.clip(np.round(inp), 0, 1).astype(int))
+
     if stop_after_unique_inputs:
-        unique_inputs = {tuple(patch_inputs[s]) for s, _ in segments}
+        unique_inputs = {_uniqueness_key(patch_inputs[s]) for s, _ in segments}
         seen_inputs   = set()
+
+    remaining_targets = None
+    if target_inputs is not None:
+        remaining_targets = [_rounded_key(t) for t in target_inputs]
+        seen_target_keys  = set()
 
     for seg_idx, (s, e) in enumerate(segments):
         seg_hidden = patch_hidden[s:e+1]
         raw_input  = patch_inputs[s]
+        rounded_key = _rounded_key(raw_input)
+
+        if remaining_targets is not None:
+            if rounded_key not in remaining_targets or rounded_key in seen_target_keys:
+                continue
+            seen_target_keys.add(rounded_key)
 
         if stop_after_unique_inputs:
-            seen_inputs.add(tuple(raw_input))
+            seen_inputs.add(_uniqueness_key(raw_input))
             if seen_inputs >= unique_inputs:
                 # This is the last segment needed — plot it, then stop
                 pass  # falls through; break at end of this iteration
@@ -4811,6 +4832,9 @@ def plot_patch_segments_with_fixed_points(
                 fname_spec = f'trial{trial_idx}_patch{patch_idx}_seg{seg_idx}_spectra.pdf'
                 plt.savefig(os.path.join(save_dir, fname_spec), bbox_inches='tight')
             plt.show()
+
+        if remaining_targets is not None and seen_target_keys >= set(remaining_targets):
+            break
 
         if stop_after_unique_inputs and seen_inputs >= unique_inputs:
             break
@@ -5830,12 +5854,6 @@ def plot_reward_pattern_results(
             if ax_pp_ctx is None:
                 continue
 
-            # Shade time steps where anytte_data odor input (columns 1:4) is active
-            odor_active = seq_batch[p_idx, :, 1:4].max(axis=-1) > 0.5
-            transitions = np.diff(odor_active.astype(int), prepend=0, append=0)
-            for t_s, t_e in zip(np.where(transitions == 1)[0], np.where(transitions == -1)[0]):
-                ax_pp_ctx.axvspan(t_s, t_e, alpha=0.08, color='grey', zorder=0, linewidth=0)
-
             for s_idx in range(n_initial_states):
                 batch_idx = s_idx * n_patterns + p_idx
                 t_end  = exit_times_flat[batch_idx]
@@ -6046,7 +6064,7 @@ def run_specified_reward_patterns_env_pca(
     hidden_size=64,
     n_initial_states=1,
     max_steps=400,
-    initial_patch_type=2,
+    patch_num=2,
     seed=0,
     elev=20,
     azim=30,
@@ -6067,8 +6085,8 @@ def run_specified_reward_patterns_env_pca(
         env_params       : TreadmillEnvParams; defaults to treadmill_session_default_params().
         n_initial_states : number of sampled initial hidden states per pattern.
         max_steps        : maximum env steps per rollout.
-        initial_patch_type: if not None, force the agent's first patch to this
-            odor type (0/1/2) by rejection-sampling env reset keys.
+        patch_num        : if not None, force the agent's first patch to this
+            patch type / odor type (0/1/2) by rejection-sampling env reset keys.
         traj_data        : used to sample initial hidden states and fit PCA.
 
     Returns:
@@ -6096,19 +6114,19 @@ def run_specified_reward_patterns_env_pca(
     # Env reset — shared key per initial state across patterns so the patch
     # layout (type, site spacing) matches across patterns until behaviour diverges.
     base_key = jax.random.key(seed)
-    if initial_patch_type is None:
+    if patch_num is None:
         is_keys = jax.random.split(base_key, n_initial_states)
     else:
-        # Rejection-sample reset keys whose first patch is initial_patch_type.
+        # Rejection-sample reset keys whose first patch is patch_num.
         pool_factor = 64
         pool_keys   = jax.random.split(base_key, n_initial_states * pool_factor)
         _, pool_state = jax.vmap(reset, in_axes=(0, None))(pool_keys, env_params)
         pool_ptype = np.array(pool_state.current_patch_num)
-        match = np.where(pool_ptype == initial_patch_type)[0]
+        match = np.where(pool_ptype == patch_num)[0]
         if len(match) < n_initial_states:
             raise ValueError(
                 f'Only {len(match)} of {len(pool_keys)} resets gave patch type '
-                f'{initial_patch_type}; increase pool_factor.')
+                f'{patch_num}; increase pool_factor.')
         is_keys = pool_keys[jnp.asarray(match[:n_initial_states])]
     reset_keys = jnp.repeat(is_keys, n_patterns, axis=0)
     obs, env_state = jax.vmap(reset, in_axes=(0, None))(reset_keys, env_params)

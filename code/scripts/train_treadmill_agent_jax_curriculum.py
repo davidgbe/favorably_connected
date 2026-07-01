@@ -47,7 +47,7 @@ from train_treadmill_agent_jax import (
 class CurriculumStep:
     n_sessions: int
     output_save_start: int
-    output_save_step: int
+    output_save_step: Optional[int] = None
     output_save_end: Optional[int] = None
     dwell_time_for_reward: int = 3
     reward_site_len: int = 3
@@ -58,6 +58,7 @@ class CurriculumStep:
     reward_prob_prefactors: List = field(default_factory=lambda: [0.8, 0.8, 0.8])
     reward_decay_range: List = field(default_factory=lambda: [0.0, 40.0])
     reward_prob_range: List = field(default_factory=lambda: [0.05, 0.95])
+    patch_active_transition_prob_range: List = field(default_factory=lambda: [0.9, 0.9])
     interreward_len_bounds: List = field(default_factory=lambda: [1.0, 6.0])
     interreward_len_decay_rate: float = 0.8
     interpatch_len_bounds: List = field(default_factory=lambda: [1.0, 12.0])
@@ -85,6 +86,8 @@ class CurriculumConfig:
     rnn_type: str = 'GRU'
     init_scale: float = 1.0
     seed: int = 0
+    n_save_envs: int = 1
+    init_checkpoint: str = None
     curriculum: List[CurriculumStep] = field(default_factory=list)
 
 
@@ -105,6 +108,7 @@ def build_env_params(step: CurriculumStep):
         reward_prob_prefactors=jnp.array(step.reward_prob_prefactors),
         reward_decay_range=jnp.array(step.reward_decay_range),
         reward_prob_range=jnp.array(step.reward_prob_range),
+        patch_active_transition_prob_range=jnp.array(step.patch_active_transition_prob_range),
         interreward_len_bounds=jnp.array(step.interreward_len_bounds),
         interreward_len_decay_rate=step.interreward_len_decay_rate,
         interpatch_len_bounds=jnp.array(step.interpatch_len_bounds),
@@ -123,7 +127,7 @@ def should_save(session_in_step: int, n_sessions: int, save_start: int,
             (session_in_step - save_start) % save_step == 0)
 
 
-def train_curriculum(config: CurriculumConfig):
+def train_curriculum(config: CurriculumConfig, checkpoint_path: str = None):
     total_sessions = sum(s.n_sessions for s in config.curriculum)
     print(f"Starting curriculum training: {config.exp_name}")
     print(f"  {len(config.curriculum)} steps, {total_sessions} total sessions")
@@ -142,6 +146,13 @@ def train_curriculum(config: CurriculumConfig):
         rng_key=net_init_key,
         init_scale=config.init_scale,
     )
+
+    checkpoint_path = checkpoint_path or config.init_checkpoint
+    if checkpoint_path is not None:
+        checkpoint_path = str(Path(checkpoint_path).resolve())
+        restored = checkpoints.restore_checkpoint(ckpt_dir=checkpoint_path, target={'params': params})
+        params = restored['params']
+        print(f"  Loaded params from checkpoint: {checkpoint_path}")
 
     train_state = create_train_state(
         rng_key=rng_key,
@@ -238,14 +249,15 @@ def train_curriculum(config: CurriculumConfig):
                            step.output_save_step, step.output_save_end):
                 rng_key, save_reset_key = random.split(train_state.rng_key)
                 train_state = train_state.replace(rng_key=rng_key)
+                save_reset_keys = random.split(save_reset_key, config.n_save_envs)
                 save_obs, save_env_states = jax.vmap(reset_fn, in_axes=(0, None))(
-                    save_reset_key[None], env_params
+                    save_reset_keys, env_params
                 )
                 save_train_state = train_state.replace(
-                    actor_hidden=jnp.zeros((1, config.hidden_size)),
-                    critic_hidden=jnp.zeros((1, config.hidden_size)),
-                    prev_action=jnp.zeros((1,), dtype=jnp.int32),
-                    prev_reward=jnp.zeros((1,)),
+                    actor_hidden=jnp.zeros((config.n_save_envs, config.hidden_size)),
+                    critic_hidden=jnp.zeros((config.n_save_envs, config.hidden_size)),
+                    prev_action=jnp.zeros((config.n_save_envs,), dtype=jnp.int32),
+                    prev_reward=jnp.zeros((config.n_save_envs,)),
                     prev_obs=save_obs,
                 )
                 trajectory, _, _ = collect_trajectory(
@@ -259,11 +271,15 @@ def train_curriculum(config: CurriculumConfig):
                     obs_size=config.obs_size,
                     n_steps=N_UPDATES_PER_SESSION * N_STEPS_PER_UPDATE,
                 )
-                traj_no_batch = jax.tree_util.tree_map(lambda x: x[0], trajectory)
-                traj_dict = serialization.to_state_dict(traj_no_batch)
+                traj_dicts = [
+                    serialization.to_state_dict(
+                        jax.tree_util.tree_map(lambda x: x[i], trajectory)
+                    )
+                    for i in range(config.n_save_envs)
+                ]
                 traj_path = step_traj_dir / f'traj_{session_abs:06d}.pkl'
                 with open(traj_path, 'wb') as f:
-                    pickle.dump([traj_dict], f)
+                    pickle.dump(traj_dicts, f)
                 print(f'  -> Saved trajectory to {traj_path}')
 
                 checkpoints.save_checkpoint(
@@ -299,6 +315,8 @@ def main():
                         help='Path to curriculum JSON config file')
     parser.add_argument('--n_networks', type=int, default=1,
                         help='Number of networks to train sequentially (default: 1)')
+    parser.add_argument('--checkpoint', type=str, default=None,
+                        help='Path to checkpoint directory or file to initialise params from')
     args = parser.parse_args()
 
     config = load_curriculum_config(args.config)
@@ -312,7 +330,7 @@ def main():
         network_config = dataclasses.replace(
             config, seed=network_seed, exp_name=network_exp_name
         )
-        train_curriculum(network_config)
+        train_curriculum(network_config, checkpoint_path=args.checkpoint)
 
 
 if __name__ == '__main__':

@@ -56,6 +56,12 @@ class A2CRNNFlax(nn.Module):
             kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
         )
 
+        # Scalar readout used only for supervised integration pretraining.
+        self.integration_prediction = nn.Dense(
+            1,
+            kernel_init=nn.initializers.orthogonal(scale=self.init_scale),
+        )
+
     def __call__(self, x, actor_hidden, critic_hidden):
         """
         Args:
@@ -96,8 +102,31 @@ class A2CRNNFlax(nn.Module):
         obs_pred = self.obs_prediction(obs_pred_h)
 
         return logits, value, new_actor_hidden, new_critic_hidden, pred_env_quality, obs_pred, pred_exp_filtered_reward_rate
-    
-    
+
+    def integrate(self, x, actor_hidden):
+        """Actor-GRU forward with the scalar integration readout.
+
+        Used only for supervised integration pretraining; touches the actor RNN
+        and `integration_prediction` head only (critic and other heads untouched).
+
+        Args:
+            x: input (batch_size, input_dim)
+            actor_hidden: (batch_size, hidden_size)
+        Returns:
+            (pred, new_actor_hidden) where pred is (batch_size, 1)
+        """
+        new_actor_hidden, actor_outputs = self.rnn_actor(actor_hidden, x)
+
+        noise_actor = random.normal(
+            self.make_rng('noise'),
+            new_actor_hidden.shape
+        ) * self.unit_noise_std
+        new_actor_hidden = new_actor_hidden + noise_actor
+
+        pred = self.integration_prediction(actor_outputs)
+        return pred, new_actor_hidden
+
+
 def init_network_and_params(
     hidden_size: int,
     action_size: int,

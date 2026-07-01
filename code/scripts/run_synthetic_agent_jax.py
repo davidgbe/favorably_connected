@@ -82,6 +82,7 @@ class SyntheticAgentState:
     got_reward_this_site: jnp.ndarray    # (num_envs,)  bool
     opt_out_flag: jnp.ndarray            # (num_envs,)  bool
     prev_in_odor: jnp.ndarray            # (num_envs,)  bool
+    acc_rewards_in_patch: jnp.ndarray    # (num_envs,)  int32  cumulative rewards this patch
     rng_key: jnp.ndarray
 
 
@@ -138,6 +139,8 @@ class SyntheticAgentConfig:
         default_factory=lambda: jnp.array([0.0, 40.0]))
     reward_prob_range: jnp.ndarray = struct.field(
         default_factory=lambda: jnp.array([0.0, 1.0]))
+    patch_active_transition_prob_range: jnp.ndarray = struct.field(
+        default_factory=lambda: jnp.array([0.9, 0.9]))
     interreward_len_bounds: jnp.ndarray = struct.field(
         default_factory=lambda: jnp.array([1.0, 6.0]))
     interreward_len_decay_rate: float = 0.8
@@ -148,6 +151,7 @@ class SyntheticAgentConfig:
     reward_site_len: int = 3
     gr_offset: float = 0.05
     gr_scale: float = 0.0
+    acc_reward_scale: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +168,7 @@ def collect_synthetic_trajectory(
     n_steps: int,
     gr_offset: float = 0.05,
     gr_scale: float = 0.0,
+    acc_reward_scale: float = 0.0,
 ) -> Tuple[SyntheticTrajectoryData, SyntheticAgentState, TreadmillEnvState]:
     """Collect a trajectory with the synthetic count-failures agent via lax.scan."""
 
@@ -237,10 +242,18 @@ def collect_synthetic_trajectory(
             )
         )
 
-        # Opt-out flag: threshold scales with global reward rate so richer
-        # environments trigger opt-out sooner (MVT-like).
+        # Accumulated rewards in patch: increment on reward, reset on patch exit.
+        new_acc_rewards_in_patch = jnp.where(
+            ~in_patch, 0,
+            agent_state.acc_rewards_in_patch + (rewards > 0).astype(jnp.int32),
+        )
+
+        # Opt-out flag: threshold scales with global reward rate (MVT-like) and
+        # increases with accumulated rewards collected in the current patch.
         effective_n_failures = jnp.maximum(
-            n_failures + (gr_offset - new_env_states.exp_filtered_reward_rate) / gr_offset * gr_scale,
+            n_failures
+            + (gr_offset - new_env_states.exp_filtered_reward_rate) / gr_offset * gr_scale
+            + acc_reward_scale * new_acc_rewards_in_patch,
             1.,
         )
         # jax.debug.print('Effective n_failures: {x}', x=effective_n_failures)
@@ -257,6 +270,7 @@ def collect_synthetic_trajectory(
             got_reward_this_site=new_got_reward,
             opt_out_flag=new_opt_out_flag,
             prev_in_odor=in_odor & in_patch,
+            acc_rewards_in_patch=new_acc_rewards_in_patch,
             rng_key=rng_key,
         )
 
@@ -290,7 +304,15 @@ def collect_synthetic_trajectory(
 # Main runner
 # ---------------------------------------------------------------------------
 
-def run_synthetic_agent(config: SyntheticAgentConfig = None, save_trajectories: bool = True):
+def run_synthetic_agent(config: SyntheticAgentConfig = None, save_trajectories: bool = True,
+                        save_outputs: bool = True):
+    """Run the synthetic agent.
+
+    save_outputs : if False, nothing is written to disk (no checkpoints dir,
+        per-session reward files, figures, or results/trajectory pickles); the
+        results dict is still returned in memory. Useful for plotting in a
+        notebook without consuming disk.
+    """
     if config is None:
         config = SyntheticAgentConfig()
 
@@ -310,6 +332,7 @@ def run_synthetic_agent(config: SyntheticAgentConfig = None, save_trajectories: 
         reward_prob_prefactors=config.reward_prob_prefactors,
         reward_decay_range=config.reward_decay_range,
         reward_prob_range=config.reward_prob_range,
+        patch_active_transition_prob_range=config.patch_active_transition_prob_range,
         interreward_len_bounds=config.interreward_len_bounds,
         interreward_len_decay_rate=config.interreward_len_decay_rate,
         interpatch_len_bounds=config.interpatch_len_bounds,
@@ -319,12 +342,13 @@ def run_synthetic_agent(config: SyntheticAgentConfig = None, save_trajectories: 
 
     reset_fn, _, _ = TreadmillEnvironment()
 
-    save_dir = Path(f'checkpoints/{config.exp_name}').resolve()
-    save_dir.mkdir(parents=True, exist_ok=True)
-    save_dir_rewards = save_dir / '_reward_rates'
-    save_dir_rewards.mkdir(parents=True, exist_ok=True)
-    results_dir = Path('results') / config.exp_name
-    results_dir.mkdir(parents=True, exist_ok=True)
+    if save_outputs:
+        save_dir = Path(f'checkpoints/{config.exp_name}').resolve()
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_dir_rewards = save_dir / '_reward_rates'
+        save_dir_rewards.mkdir(parents=True, exist_ok=True)
+        results_dir = Path('results') / config.exp_name
+        results_dir.mkdir(parents=True, exist_ok=True)
 
     all_session_rewards = []
     all_trajectories = [] if save_trajectories else None
@@ -345,6 +369,7 @@ def run_synthetic_agent(config: SyntheticAgentConfig = None, save_trajectories: 
             got_reward_this_site=jnp.zeros(config.num_envs, dtype=bool),
             opt_out_flag=jnp.zeros(config.num_envs, dtype=bool),
             prev_in_odor=in_odor_init,
+            acc_rewards_in_patch=jnp.zeros(config.num_envs, dtype=jnp.int32),
             rng_key=agent_key,
         )
 
@@ -357,13 +382,14 @@ def run_synthetic_agent(config: SyntheticAgentConfig = None, save_trajectories: 
             n_steps=N_STEPS_PER_SESSION,
             gr_offset=config.gr_offset,
             gr_scale=config.gr_scale,
+            acc_reward_scale=config.acc_reward_scale,
         )
 
         session_mean_reward = float(jnp.mean(trajectory.rewards))
         all_session_rewards.append(session_mean_reward)
         print(f'Session {session_num}: mean reward = {session_mean_reward:.4f}')
 
-        if session_num == 0:
+        if session_num == 0 and save_outputs:
             T = 200
             obs   = np.array(trajectory.observations[0, :T])   # (T, obs_size)
             acts  = np.array(trajectory.actions[0, :T])        # (T,) 0=stop 1=move
@@ -397,19 +423,21 @@ def run_synthetic_agent(config: SyntheticAgentConfig = None, save_trajectories: 
         if save_trajectories:
             all_trajectories.append(serialization.to_state_dict(trajectory))
 
-        sn = zero_pad(session_num, 6)
-        with open(save_dir_rewards / f'{sn}', 'ab') as f:
-            np.save(f, np.array(trajectory.rewards))
+        if save_outputs:
+            sn = zero_pad(session_num, 6)
+            with open(save_dir_rewards / f'{sn}', 'ab') as f:
+                np.save(f, np.array(trajectory.rewards))
 
     # Reward curve
-    fig, ax = plt.subplots(figsize=(8, 4))
-    ax.plot(all_session_rewards)
-    ax.set_xlabel('Session')
-    ax.set_ylabel('Mean reward rate')
-    ax.set_title(config.exp_name)
-    fig.tight_layout()
-    fig.savefig(results_dir / 'reward_rate.png', dpi=100)
-    plt.close(fig)
+    if save_outputs:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(all_session_rewards)
+        ax.set_xlabel('Session')
+        ax.set_ylabel('Mean reward rate')
+        ax.set_title(config.exp_name)
+        fig.tight_layout()
+        fig.savefig(results_dir / 'reward_rate.png', dpi=100)
+        plt.close(fig)
 
     results = {
         'session_rewards': all_session_rewards,
@@ -418,15 +446,16 @@ def run_synthetic_agent(config: SyntheticAgentConfig = None, save_trajectories: 
         'timestamp': datetime.now().isoformat(),
     }
 
-    if save_trajectories and all_trajectories:
+    if save_outputs and save_trajectories and all_trajectories:
         traj_file = results_dir / f'trajectories_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
         with open(traj_file, 'wb') as f:
             pickle.dump(all_trajectories, f)
         print(f'Trajectories saved to {traj_file}')
 
-    results_file = results_dir / f'results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
-    with open(results_file, 'wb') as f:
-        pickle.dump(results, f)
+    if save_outputs:
+        results_file = results_dir / f'results_{datetime.now().strftime("%Y%m%d_%H%M%S")}.pkl'
+        with open(results_file, 'wb') as f:
+            pickle.dump(results, f)
 
     print(f'\nDone. Mean reward rate: {results["mean_reward_rate"]:.4f}')
     return results, all_trajectories
@@ -441,6 +470,7 @@ def load_config_from_json(filepath: str) -> SyntheticAgentConfig:
         d = json.load(f)
     for key in ('reward_decay_consts', 'reward_prob_prefactors',
                 'reward_decay_range', 'reward_prob_range',
+                'patch_active_transition_prob_range',
                 'interreward_len_bounds', 'interpatch_len_bounds'):
         if key in d:
             d[key] = jnp.array(d[key])

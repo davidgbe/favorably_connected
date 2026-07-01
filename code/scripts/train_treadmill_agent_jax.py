@@ -323,6 +323,7 @@ class TrainingConfig:
 
     reward_decay_range: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0.0, 40.0]))
     reward_prob_range: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0.0, 1.0]))
+    patch_active_transition_prob_range: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([0.9, 0.9]))
     interreward_len_bounds: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([1.0, 6.0]))
     interreward_len_decay_rate: float = 0.8
     interpatch_len_bounds: jnp.ndarray = struct.field(default_factory=lambda: jnp.array([1.0, 12.0]))
@@ -375,6 +376,8 @@ def load_config_from_json(filepath: str) -> TrainingConfig:
         config_dict['reward_prob_prefactors'] = jnp.array(config_dict['reward_prob_prefactors'])
     if 'reward_decay_range' in config_dict:
         config_dict['reward_decay_range'] = jnp.array(config_dict['reward_decay_range'])
+    if 'patch_active_transition_prob_range' in config_dict:
+        config_dict['patch_active_transition_prob_range'] = jnp.array(config_dict['patch_active_transition_prob_range'])
     if 'interreward_len_bounds' in config_dict:
         config_dict['interreward_len_bounds'] = jnp.array(config_dict['interreward_len_bounds'])
     if 'interpatch_len_bounds' in config_dict:
@@ -469,6 +472,7 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
         reward_prob_prefactors=config.reward_prob_prefactors,
         reward_decay_range=config.reward_decay_range,
         reward_prob_range=config.reward_prob_range,
+        patch_active_transition_prob_range=config.patch_active_transition_prob_range,
         interreward_len_bounds=config.interreward_len_bounds,
         interreward_len_decay_rate=config.interreward_len_decay_rate,
         interpatch_len_bounds=config.interpatch_len_bounds,
@@ -645,6 +649,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
         reward_decay_consts=config.reward_decay_consts,
         reward_prob_prefactors=config.reward_prob_prefactors,
         reward_decay_range=config.reward_decay_range,
+        patch_active_transition_prob_range=config.patch_active_transition_prob_range,
         interreward_len_bounds=config.interreward_len_bounds,
         interreward_len_decay_rate=config.interreward_len_decay_rate,
         interpatch_len_bounds=config.interpatch_len_bounds,
