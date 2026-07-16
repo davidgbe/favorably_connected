@@ -4469,6 +4469,7 @@ def plot_patch_segments_with_fixed_points(
     vmin_inputs=-1,
     traj_cmap=None,
     plot_current_segment=True,
+    plot_pcs_4_6=False,
 ):
     """Plot a single patch visit in 3D PC space, split by constant-input segments.
 
@@ -4515,6 +4516,7 @@ def plot_patch_segments_with_fixed_points(
     INPUT_ROW_LABELS = obs_labels + ['action', 'reward']
 
     obs    = traj_data['observations'].reshape(n_envs, N_STEPS, -1)[trial_idx]
+    print(obs[:5])
     hidden = traj_data['actor_hidden'].reshape(n_envs, N_STEPS, -1)[trial_idx]
     inputs = network_inputs[trial_idx]
 
@@ -4592,10 +4594,12 @@ def plot_patch_segments_with_fixed_points(
             seen_target_keys.add(rounded_key)
 
         if stop_after_unique_inputs:
-            seen_inputs.add(_uniqueness_key(raw_input))
-            if seen_inputs >= unique_inputs:
-                # This is the last segment needed — plot it, then stop
-                pass  # falls through; break at end of this iteration
+            key_u = _uniqueness_key(raw_input)
+            if key_u in seen_inputs:
+                # Already plotted a segment with this (rounded) input context — skip
+                # the duplicate so each unique input is shown exactly once.
+                continue
+            seen_inputs.add(key_u)
 
         # Build input_vec for FP search: [obs(n_obs), one_hot_action(2), reward(1)]
         if includes_actions_and_rewards:
@@ -4826,6 +4830,52 @@ def plot_patch_segments_with_fixed_points(
 
         plt.show()
 
+        # Optional: same trajectory + fixed points projected onto PCs 4-6
+        if plot_pcs_4_6:
+            hi = [3, 4, 5]
+            ph = pca.transform(patch_hidden)[:, hi]        # full patch, PCs 4-6
+            proj_hi = ph[s:e + 1]
+            full_pts_hi  = ph.reshape(-1, 1, 3)
+            full_segs_hi = np.concatenate([full_pts_hi[:-1], full_pts_hi[1:]], axis=1)
+            fps_hi = pca.transform(np.array(unique_fps))[:, hi] if n_fps > 0 else None
+
+            fig_hi = plt.figure(figsize=(figsize[0], 0.55 * figsize[0]))
+            gs_hi  = fig_hi.add_gridspec(1, 2, wspace=0.1)
+            for k, (el, az) in enumerate([(elev, azim), (elev2, azim2)]):
+                axk = fig_hi.add_subplot(gs_hi[0, k], projection='3d')
+                axk.add_collection3d(_depth_alpha_lc3d(
+                    full_segs_hi, cmap_traj(full_norm(t_full)), el, az,
+                    linewidth=1, zorder=1))
+                if plot_current_segment:
+                    seg_pts_hi  = proj_hi.reshape(-1, 1, 3)
+                    seg_segs_hi = np.concatenate([seg_pts_hi[:-1], seg_pts_hi[1:]], axis=1)
+                    axk.add_collection3d(_depth_alpha_lc3d(
+                        seg_segs_hi, cmap_sep(sep_norm(scores[1:])), el, az,
+                        alpha_min=0.3, linewidth=2, zorder=2))
+                    axk.scatter(*proj_hi[0],  s=120, color='green', marker='*',
+                                edgecolors='none', zorder=5)
+                    axk.scatter(*proj_hi[-1], s=120, color='red', marker='*',
+                                edgecolors='none', zorder=5)
+                if n_fps > 0:
+                    if preloaded_fps is not None:
+                        axk.scatter(fps_hi[:, 0], fps_hi[:, 1], fps_hi[:, 2],
+                                    s=80, marker='o', color='grey',
+                                    edgecolors='k', linewidths=0.5, zorder=6)
+                    else:
+                        axk.scatter(fps_hi[:, 0], fps_hi[:, 1], fps_hi[:, 2],
+                                    s=80, marker='o', c=max_eigs, cmap=cmap_fp,
+                                    norm=fp_norm, edgecolors='k', linewidths=0.5, zorder=6)
+                _style_3d_ax(axk, sep_norm, cmap_sep, 'separatrix side', cbar=False)
+                axk.view_init(elev=el, azim=az)
+                axk.set_xlabel('PC4'); axk.set_ylabel('PC5'); axk.set_zlabel('PC6')
+                axk.set_title(f'PCs 4-6 (view {k + 1})', fontsize=8)
+            if save_dir is not None:
+                fig_hi.savefig(os.path.join(
+                    save_dir,
+                    f'trial{trial_idx}_patch{patch_idx}_seg{seg_idx}_pc456.pdf'),
+                    bbox_inches='tight')
+            plt.show()
+
         if fp_eigenvalues is not None:
             plot_eigenspectra_grid(fp_eigenvalues, n_plots=min(n_fps, 9))
             if save_dir is not None:
@@ -4861,6 +4911,7 @@ def plot_patch_segments_forward_runs(
     patch_type=None,
     traj_cmap=None,
     seed=0,
+    plot_pcs_4_6=False,
 ):
     """For each unique input in a patch visit, plot forward runs from random states.
 
@@ -5031,19 +5082,19 @@ def plot_patch_segments_forward_runs(
             ))
 
         # Build per-trajectory segment arrays once
-        def _draw_forward(ax, cam_elev, cam_azim):
-            for b in range(all_proj.shape[1]):
-                pts  = all_proj[:, b, :].reshape(-1, 1, 3)
+        def _draw_forward(ax, cam_elev, cam_azim, proj):
+            for b in range(proj.shape[1]):
+                pts  = proj[:, b, :].reshape(-1, 1, 3)
                 segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
                 colors = cmap_traj(time_norm(t_vals))
                 lc = _depth_alpha_lc3d(segs, colors, cam_elev, cam_azim,
                                        alpha_min=0.1, linewidth=0.8, zorder=2)
                 ax.add_collection3d(lc)
-            ax.scatter(all_proj[0, :, 0], all_proj[0, :, 1], all_proj[0, :, 2],
+            ax.scatter(proj[0, :, 0], proj[0, :, 1], proj[0, :, 2],
                        s=6, color='green', alpha=0.5, zorder=3, depthshade=False)
 
         obs_str = ', '.join(f'{v:.2f}' for v in obs_vec)
-        _draw_forward(ax_3d, elev, azim)
+        _draw_forward(ax_3d, elev, azim, all_proj)
         ax_3d.set_title(
             f'obs=[{obs_str}]  act={action_idx}  rew={reward_val:.2f}  '
             f'n_states={all_proj.shape[1]}',
@@ -5067,7 +5118,7 @@ def plot_patch_segments_forward_runs(
         ax_cb_time.tick_params(labelsize=9)
 
         # Second 3D view
-        _draw_forward(ax_3d2, elev2, azim2)
+        _draw_forward(ax_3d2, elev2, azim2, all_proj)
         _style_3d_ax(ax_3d2, time_norm, cmap_traj, 'time', cbar=False)
         ax_3d2.view_init(elev=elev2, azim=azim2)
         add_separatrix_plane(ax_3d2, params, pca)
@@ -5078,6 +5129,27 @@ def plot_patch_segments_forward_runs(
             fig.savefig(os.path.join(save_dir, fname), bbox_inches='tight')
 
         plt.show()
+
+        # Optional: same forward runs projected onto PCs 4-6
+        if plot_pcs_4_6:
+            all_proj_hi = pca.transform(
+                trajs.reshape(-1, trajs.shape[-1]))[:, [3, 4, 5]].reshape(
+                    n_forward_steps, trajs.shape[1], 3)
+            fig_hi = plt.figure(figsize=(figsize[0], 0.55 * figsize[0]))
+            gs_hi  = fig_hi.add_gridspec(1, 2, wspace=0.1)
+            for k, (el, az) in enumerate([(elev, azim), (elev2, azim2)]):
+                axk = fig_hi.add_subplot(gs_hi[0, k], projection='3d')
+                _draw_forward(axk, el, az, all_proj_hi)
+                _style_3d_ax(axk, time_norm, cmap_traj, 'time', cbar=False)
+                axk.view_init(elev=el, azim=az)
+                axk.set_xlabel('PC4'); axk.set_ylabel('PC5'); axk.set_zlabel('PC6')
+                axk.set_title(f'PCs 4-6 (view {k + 1})', fontsize=8)
+            if save_dir is not None:
+                fig_hi.savefig(os.path.join(
+                    save_dir,
+                    f'trial{trial_idx}_patch{patch_idx}_input{ui_idx}_forward_pc456.pdf'),
+                    bbox_inches='tight')
+            plt.show()
 
 
 def save_fixed_points_for_unique_inputs(

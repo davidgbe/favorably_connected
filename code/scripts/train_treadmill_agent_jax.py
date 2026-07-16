@@ -56,6 +56,7 @@ class RewardParamStyle(IntEnum):
     FIXED = 0
     INDEP = 1
     COUPLED = 2
+    PER_PATCH_INDEP = 3
 
 
 class RewardFuncType(IntEnum):
@@ -443,9 +444,9 @@ def run_session_updates_with_metrics(
         length=N_UPDATES_PER_SESSION,
     )
 
-    jax.debug.print('grad_norm: {x}', x=all_metrics['grad_norm'])
-    jax.debug.print('activity_norm: {x}', x=all_metrics['activity_loss'])
-    
+    # jax.debug.print('grad_norm: {x}', x=all_metrics['grad_norm'])
+    # jax.debug.print('activity_norm: {x}', x=all_metrics['activity_loss'])
+
     return final_train_state, final_env_states, all_metrics
 
 

@@ -6,6 +6,12 @@ from typing import Tuple, Dict, Any, Optional
 from functools import partial
 
 
+# Integer flags for reward_param_style; mirror RewardParamStyle in
+# scripts/train_treadmill_agent_jax.py. per_patch_indep resamples reward
+# params (indep-style) at each new patch render rather than once per reset.
+REWARD_PARAM_STYLE_PER_PATCH_INDEP = 3
+
+
 @struct.dataclass
 class PatchState:
     """JAX version of your Patch class state"""
@@ -111,7 +117,29 @@ def TreadmillEnvironment():
     
     step_vals = jnp.array([0.0, 1.0])
     obs_size = 4
-    
+
+    def new_reward_params_indep(key, params):
+        """Independent per-patch-type resample of decay consts and prefactors.
+
+        Fixed patch types keep their configured values. Shared by reset (session
+        draw) and per_patch_indep new-patch renders (per-patch draw).
+        """
+        key, subkey1, subkey2 = random.split(key, 3)
+        sampled_decay = random.uniform(
+            subkey1,
+            shape=3,
+            minval=params.reward_decay_range[0],
+            maxval=params.reward_decay_range[1],
+        )
+        sampled_prefactors = random.uniform(
+            subkey2,
+            shape=3,
+            minval=params.reward_prob_range[0],
+            maxval=params.reward_prob_range[1],
+        )
+        reward_params = jnp.where(params.fixed_patches, params.reward_decay_consts, sampled_decay)
+        new_reward_prob_prefactors = jnp.where(params.fixed_patches, params.reward_prob_prefactors, sampled_prefactors)
+        return reward_params, new_reward_prob_prefactors
 
     @jax.jit
     def reset(
@@ -124,24 +152,6 @@ def TreadmillEnvironment():
 
         def old_reward_params(key, params):
             return params.reward_decay_consts, params.reward_prob_prefactors
-        
-        def new_reward_params_indep(key, params):
-            key, subkey1, subkey2 = random.split(key, 3)
-            sampled_decay = random.uniform(
-                subkey1,
-                shape=3,
-                minval=params.reward_decay_range[0],
-                maxval=params.reward_decay_range[1],
-            )
-            sampled_prefactors = random.uniform(
-                subkey2,
-                shape=3,
-                minval=params.reward_prob_range[0],
-                maxval=params.reward_prob_range[1],
-            )
-            reward_params = jnp.where(params.fixed_patches, params.reward_decay_consts, sampled_decay)
-            new_reward_prob_prefactors = jnp.where(params.fixed_patches, params.reward_prob_prefactors, sampled_prefactors)
-            return reward_params, new_reward_prob_prefactors
 
         def new_reward_params_coupled(key, params):
             key, subkey = random.split(key)
@@ -166,6 +176,7 @@ def TreadmillEnvironment():
                 old_reward_params,
                 new_reward_params_indep,
                 new_reward_params_coupled,
+                new_reward_params_indep,  # per_patch_indep: first patch is a fresh indep draw
 
             ),
             subkey_reward_param,
@@ -348,18 +359,26 @@ def TreadmillEnvironment():
             state, was_in_patch, old_idx, new_idx, dist, key = args
 
             def just_left_patch(key, s):
-                key, subkey1, subkey2 = random.split(key, 3)
+                key, subkey1, subkey2, subkey_rp = random.split(key, 4)
                 patch_num = generate_next_patch_type(subkey1, s.current_patch_num, params)
 
                 interpatch_len = sample_truncated_exp(
-                    key, 
-                    params.interpatch_len_bounds, 
+                    key,
+                    params.interpatch_len_bounds,
                     params.interpatch_len_decay_rate
                 ).astype(int)
 
                 new_patch_start = s.current_patch.current_reward_site_end + interpatch_len
 
-                patch_state = generate_patch(patch_num, new_patch_start, s.reward_params, s.reward_prob_prefactors)
+                # per_patch_indep: redraw reward params for the incoming patch.
+                # All other styles keep the session-level arrays (no-op).
+                reward_params_new, reward_prob_prefactors_new = lax.cond(
+                    params.reward_param_style == REWARD_PARAM_STYLE_PER_PATCH_INDEP,
+                    lambda: new_reward_params_indep(subkey_rp, params),
+                    lambda: (s.reward_params, s.reward_prob_prefactors),
+                )
+
+                patch_state = generate_patch(patch_num, new_patch_start, reward_params_new, reward_prob_prefactors_new)
                 patch_state = generate_new_reward_site(subkey2, patch_state, params, True)
 
 
@@ -368,7 +387,9 @@ def TreadmillEnvironment():
                     current_reward_site_attempted=False,
                     current_patch=patch_state,
                     current_patch_num=patch_num,
-                    last_patch_num=s.current_patch_num
+                    last_patch_num=s.current_patch_num,
+                    reward_params=reward_params_new,
+                    reward_prob_prefactors=reward_prob_prefactors_new,
                 ), jnp.array(0.0)
             
             return lax.cond(was_in_patch, just_left_patch, lambda key, s: (s, jnp.array(0.0)), key, state)

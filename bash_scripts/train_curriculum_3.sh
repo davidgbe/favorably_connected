@@ -22,5 +22,11 @@ export CUDA_VISIBLE_DEVICES=0
 # python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
 #   --config training_configs/fixed_exp_gru_initial_prob_offset_low_becomes_high_slow.json
 
+# python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
+#   --config training_configs/indep_exp_gru_offset_and_decay_markov_test.json
+
+# python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
+#     --config training_configs/indep_exp_gru_offset_and_decay_markov_per_patch_v4.json
+
 python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
-  --config training_configs/indep_exp_gru_offset_and_decay_markov_test.json
+    --config training_configs/gru_exp_fixed_discounting.json

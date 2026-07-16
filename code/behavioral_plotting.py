@@ -1116,17 +1116,36 @@ def plot_grouped_mean_std(df, x_col, hue_col, feature, dataset_col='dataset'):
 def plot_stop_fraction(df, x_col, y_col, condition=None, invert_y=True,
                        figsize=(5, 5), reverse=False, label=None, cmap='YlGnBu',
                        xlabel=None, ylabel=None, high_res_save=False, min_n=1,
-                       vmin=0, vmax=1):
+                       vmin=0, vmax=1, show_counts=True, counts_cmap='magma',
+                       max_ticks=8):
     """Heatmap of P(stop) over two columns in df.
 
     vmin, vmax : lower/upper probability bounds for the colormap.
+    show_counts : if True, also draw a second heatmap of the sample count per
+                  bin (same bins/min_n filter as the probability plot).
+    counts_cmap : colormap for the counts heatmap.
+    max_ticks : max number of tick labels per axis (labels are thinned evenly
+                so they don't overlap when there are many bins).
     """
+    def _thin_ticks(ax_, x_vals, y_vals):
+        for vals, set_ticks, set_labels, rot in [
+            (list(x_vals), ax_.set_xticks, ax_.set_xticklabels, 0),
+            (list(y_vals), ax_.set_yticks, ax_.set_yticklabels, 0),
+        ]:
+            n = len(vals)
+            if n == 0:
+                continue
+            step = max(1, int(np.ceil(n / max_ticks)))
+            idx = np.arange(0, n, step)
+            set_ticks(idx + 0.5)
+            set_labels([f'{vals[i]:g}' for i in idx], rotation=rot, fontsize=14)
+
     if condition is not None:
         df = condition(df)
 
+    filtered = df.groupby([y_col, x_col]).filter(lambda g: len(g) >= min_n)
     grouped = (
-        df.groupby([y_col, x_col])
-          .filter(lambda g: len(g) >= min_n)
+        filtered
           .groupby([y_col, x_col])['stopped']
           .mean()
           .reset_index()
@@ -1148,6 +1167,32 @@ def plot_stop_fraction(df, x_col, y_col, condition=None, invert_y=True,
     format_plot(ax, bottomspine=False, leftspine=False, ticklabelsize=14)
     cbar = ax.collections[0].colorbar
     format_plot(cbar.ax, bottomspine=False, leftspine=False, ticklabelsize=14)
-    plt.show()
+    _thin_ticks(ax, heatmap_data.columns, heatmap_data.index)
     matrix = 1 - heatmap_data if reverse else heatmap_data
-    return fig, matrix
+
+    counts_matrix = None
+    if show_counts:
+        counts = (
+            filtered
+              .groupby([y_col, x_col])
+              .size()
+              .reset_index(name='count')
+        )
+        counts_matrix = counts.pivot(index=y_col, columns=x_col, values='count')
+
+        from matplotlib.colors import LogNorm
+        fig_c, ax_c = plt.subplots(figsize=figsize, dpi=300 if high_res_save else 100)
+        finite = counts_matrix.values[np.isfinite(counts_matrix.values)]
+        norm = LogNorm(vmin=max(1, np.nanmin(finite)), vmax=np.nanmax(finite)) if finite.size else None
+        sns.heatmap(counts_matrix, cmap=counts_cmap, norm=norm,
+                    cbar_kws={'label': 'N samples (log)'}, ax=ax_c)
+        ax_c.set_xlabel(xlabel if xlabel is not None else x_col.replace('_', ' '))
+        ax_c.set_ylabel(ylabel if ylabel is not None else y_col.replace('_', ' '))
+        if invert_y:
+            ax_c.invert_yaxis()
+        format_plot(ax_c, bottomspine=False, leftspine=False, ticklabelsize=14)
+        cbar_c = ax_c.collections[0].colorbar
+        format_plot(cbar_c.ax, bottomspine=False, leftspine=False, ticklabelsize=14)
+        _thin_ticks(ax_c, counts_matrix.columns, counts_matrix.index)
+
+    return fig, ax, matrix, counts_matrix

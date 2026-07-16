@@ -321,7 +321,17 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
                         for i, prev_odor_site_data in enumerate(reversed(hist_odor_site_data)):
                             odor_site_data[f'rewarded_{i+1}'] = prev_odor_site_data['rewarded']
 
-                        odor_site_data['consecutive_misses'] = np.where(odor_site_data['rewarded_1'] == 1, 0, hist_odor_site_data[-1]['consecutive_misses'] + 1)
+                        # Reset the miss streak whenever the previous site was
+                        # rewarded. Detect that from the increase in
+                        # rewards_seen_in_patch (the direct per-timestep reward
+                        # count) rather than the position-sliced 'rewarded'
+                        # field: 'rewarded' can be misattributed deep in a patch
+                        # and desync from rewards_seen_in_patch, which otherwise
+                        # produces (R, c=1) rows with no preceding (R, c=0).
+                        prev_rewards_seen = hist_odor_site_data[-1]['rewards_seen_in_patch'].values[0]
+                        curr_rewards_seen = odor_site_data['rewards_seen_in_patch'].values[0]
+                        prev_site_rewarded = curr_rewards_seen > prev_rewards_seen
+                        odor_site_data['consecutive_misses'] = np.where(prev_site_rewarded, 0, hist_odor_site_data[-1]['consecutive_misses'] + 1)
                     
                     ss['all_odor_site_data'].append(hist_odor_site_data[-1])
                     hist_odor_site_data[-1]['added'] = [1]
