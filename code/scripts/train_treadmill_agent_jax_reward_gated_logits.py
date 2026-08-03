@@ -40,7 +40,7 @@ from enum import IntEnum
 # internal imports
 from aux_funcs import zero_pad
 from agents.a2c_rnn_reward_pred_flax import A2CRNNFlax, init_network_and_params
-from environments.components.train_state import TrainState, create_train_state, init_opt
+from environments.components.train_state import TrainState, create_train_state, init_opt, make_optimizer
 from environments.components.treadmill_trajectory import TrajectoryData
 # Import your existing JAX environment
 from environments.treadmill_env_jax import (
@@ -81,12 +81,15 @@ RPE_TAU = 100.0          # exponential-filter time constant -> lambda = exp(-1/R
 REWARD_PRED_HIDDEN = 64
 
 # --- per-(obs, action) credit filters (persist across update blocks) ---
-# Track an (obs_size, action_size) credit matrix. For each action a: eligibility[:, a] is a
-# low-pass of the observation that triggered a. The credit matrix is a low-pass of
-# (eligibility * reward). At each step the actor is weighted by  current_obs . credit[:, a_taken]
-# (a stimulus-specific credit for the action actually taken; see compute_a2c_loss).
-CREDIT_ELIG_DECAY = 0.8   # eligibility-trace retention per step (higher -> longer obs memory)
-CREDIT_DECAY = 0.95       # credit low-pass retention per step
+# Track (obs_size, action_size) credit matrices. For each action a: eligibility[:, a] is a
+# low-pass of the observation that triggered a. Two credit streams share this eligibility:
+#   reward stream     = low-pass_{CREDIT_DECAY_REWARD}(eligibility * reward)
+#   prediction stream = low-pass_{CREDIT_DECAY_PRED}(eligibility * reward_prediction)
+# The credit is (reward stream - prediction stream); the reward stream decays more slowly.
+# At each step the actor is weighted by  current_obs . credit[:, a_taken]  (see compute_a2c_loss).
+CREDIT_ELIG_DECAY = 0.8    # eligibility-trace retention per step (higher -> longer obs memory)
+CREDIT_DECAY_REWARD = 0.95  # reward-stream credit retention (slower decay)
+CREDIT_DECAY_PRED = 0.95    # prediction-stream credit retention (faster decay)
 
 
 @partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'n_steps', 'obs_size', 'intervention_fn'])
@@ -175,7 +178,7 @@ def collect_trajectory(
 
         # Update train state with new info. (Per-(obs, action) credit is computed downstream in
         # compute_a2c_loss, which reuses the reward-predictor net; the filter state carried in
-        # train_state.action_elig / action_credit is advanced there.)
+        # train_state.action_elig / action_credit_* is advanced there.)
         new_train_state = train_state.replace(
             rng_key=rng_key,
             actor_hidden=new_actor_hidden,
@@ -297,38 +300,49 @@ def compute_a2c_loss(
 
     # jax.debug.print('{x}', x=critic_loss)
 
-    # --- per-(obs, action) credit (persists across blocks via train_state) -----------------------
-    # Reward signal = reward - p(r_t | action_t, k-step obs history), where the prediction is the
-    # lag-0 column of the reward net (window ending at t, action a_t). For each action a:
-    #   eligibility[:, :, a] = low-pass of the observation that triggered a;
-    #   credit matrix = low-pass of (eligibility * reward_signal);
-    #   credit_for_action_t = current_obs . credit[:, :, a_taken].
+    # --- per-(obs, action) credit: two streams sharing one eligibility (persists via train_state) -
+    # For each action a: eligibility[:, :, a] = low-pass of the observation that triggered a.
+    # Two credit streams filter (eligibility * signal) with different decays:
+    #   reward stream     = low-pass_{CREDIT_DECAY_REWARD}(eligibility * reward)      (slower decay)
+    #   prediction stream = low-pass_{CREDIT_DECAY_PRED}(eligibility * r_pred)        (faster decay)
+    # credit matrix = reward stream - prediction stream;  credit_t = current_obs . credit[:, a_taken].
+    # r_pred = lag-0 column of the reward net = p(r_t | action_t, k-step obs history).
+    r_reward = lax.stop_gradient(rewards)                              # (B, N)  actual reward
     r_pred = lax.stop_gradient(r_hat[:, :, 0])                          # (B, N)  p(r_t | a_t, history)
-    reward_signal = lax.stop_gradient(rewards) - r_pred                # (B, N)  reward-prediction error
+
+    # jax.debug.print('critic_loss {x}', x=critic_loss)
+
 
     def credit_scan(carry, xt):
-        elig, credit = carry                                           # (B, obs, A) each
-        obs_t, act_t, rsig_t = xt                                      # (B, obs), (B, A), (B,)
-        obs_by_action = obs_t[:, :, None] * act_t[:, None, :]          # (B, obs, A)
+        elig, credit_rew, credit_prd = carry                           # (B, obs, A) each
+        obs_t, act_t, rew_t, prd_t = xt                                # (B, obs), (B, A), (B,), (B,)
+        obs_by_action = obs_t[:, :, None] * act_t[:, None, :] / jnp.sqrt(obs_size * A)         # (B, obs, A)
         elig = CREDIT_ELIG_DECAY * elig + (1.0 - CREDIT_ELIG_DECAY) * obs_by_action
-        credit = CREDIT_DECAY * credit + (1.0 - CREDIT_DECAY) * (elig * rsig_t[:, None, None])
+        credit_rew = CREDIT_DECAY_REWARD * credit_rew + (elig * rew_t[:, None, None])
+        credit_prd = CREDIT_DECAY_PRED * credit_prd + (elig * prd_t[:, None, None])
+        credit = credit_rew - credit_prd                              # (B, obs, A)  stream1 - stream2
         credit_taken = jnp.sum(credit * act_t[:, None, :], axis=-1)    # (B, obs)
         credit_t = jnp.sum(obs_t * credit_taken, axis=-1)             # (B,)
-        return (elig, credit), credit_t
+        return (elig, credit_rew, credit_prd), credit_t
 
-    (final_elig, final_credit), credit_tN = lax.scan(
+    (final_elig, final_credit_rew, final_credit_prd), credit_tN = lax.scan(
         credit_scan,
-        (train_state.action_elig, train_state.action_credit),          # block-start filter state
-        (jnp.swapaxes(feat, 0, 1), jnp.swapaxes(act_oh, 0, 1), jnp.swapaxes(reward_signal, 0, 1)),
+        (train_state.action_elig, train_state.action_credit_reward, train_state.action_credit_pred),
+        (jnp.swapaxes(feat, 0, 1), jnp.swapaxes(act_oh, 0, 1),
+         jnp.swapaxes(r_reward, 0, 1), jnp.swapaxes(r_pred, 0, 1)),
     )
     credit_for_action = jnp.swapaxes(credit_tN, 0, 1)                  # (B, N)
     # Advance the persistent filter state for the next block.
     final_train_state = final_train_state.replace(
-        action_elig=final_elig, action_credit=final_credit,
+        action_elig=final_elig,
+        action_credit_reward=final_credit_rew,
+        action_credit_pred=final_credit_prd,
     )
 
     # Advantage: horizon sum of predicted rewards + stimulus/action credit (grad stopped).
-    advantages = lax.stop_gradient(100 * credit_for_action + jnp.sum(r_hat, axis=-1))
+    # jax.debug.print('credit {x}', x=credit_for_action)
+    # jax.debug.print('reward {x}', x=jnp.sum(r_hat, axis=-1))
+    advantages = lax.stop_gradient(10 * credit_for_action + jnp.sum(r_hat, axis=-1)) # reducing this from 100 to 10 was pretty critical to getting this to work
     advantages = (advantages - advantages.mean(axis=0)) / (advantages.std(axis=0) + 1e-6)  # per-t standardize (baseline)
 
     log_probs = jax.nn.log_softmax(logits)
@@ -496,13 +510,9 @@ def train_step(
 
     metrics['grad_norm'] = optax.global_norm(grads)
 
-    # Apply updates
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(0.5),   # try values 0.3 – 1.0 depending on stability
-        optax.apply_if_finite(
-            optax.adam(train_state.learning_rate),
-            max_consecutive_errors=100,
-        ),
+    # Apply updates (critic/reward-predictor params use a scaled learning rate; must match init_opt)
+    optimizer = make_optimizer(
+        train_state.params, train_state.learning_rate, train_state.critic_lr_scale
     )
     updates, new_opt_state = optimizer.update(
         grads, train_state.opt_state, train_state.params
@@ -556,6 +566,7 @@ class TrainingConfig:
     pred_obs_weight: float = 0
     gamma: float = 0.999 # 0.987
     learning_rate: float = 2.5e-5 # 1e-4
+    critic_lr_scale: float = 1.0  # critic (reward-predictor) LR = learning_rate * this; <1 -> slower
     rnn_type: str = 'GRU'
     init_scale: float = 1.0
 
@@ -739,6 +750,7 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
         num_envs=config.num_envs,
         learning_rate=config.learning_rate,
         params=params,
+        critic_lr_scale=config.critic_lr_scale,
     )
 
     # Load pretrained model if path is given
@@ -806,7 +818,8 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
             prev_reward=jnp.zeros((config.num_envs,)),
             prev_obs=obs,
             action_elig=jnp.zeros((config.num_envs, config.obs_size, config.action_size)),
-            action_credit=jnp.zeros((config.num_envs, config.obs_size, config.action_size)),
+            action_credit_reward=jnp.zeros((config.num_envs, config.obs_size, config.action_size)),
+            action_credit_pred=jnp.zeros((config.num_envs, config.obs_size, config.action_size)),
         )
 
         train_state, env_states, all_metrics = run_session_updates_with_metrics(
@@ -976,6 +989,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
         num_envs=1,  # Use single environment for cleaner episode tracking
         learning_rate=config.learning_rate,
         params=params,
+        critic_lr_scale=config.critic_lr_scale,
     )
 
     # Load trained model

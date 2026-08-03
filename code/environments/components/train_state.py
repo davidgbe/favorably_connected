@@ -1,5 +1,6 @@
 """Training state management for A2C agent"""
 
+import jax
 import jax.numpy as jnp
 from flax import struct
 import optax
@@ -22,19 +23,40 @@ class TrainState:
     learning_rate: float
     grads: jnp.ndarray
     # Persistent per-(obs, action) credit filters (continue across update blocks). (NUM_ENVS, obs_size, action_size)
-    action_elig: Any = None    # per-action low-pass of the triggering observation
-    action_credit: Any = None  # low-passed (obs eligibility * reward) -> (obs, action) credit matrix
+    action_elig: Any = None            # per-action low-pass of the triggering observation
+    action_credit_reward: Any = None   # low-passed (obs eligibility * reward) -> reward-stream credit matrix
+    action_credit_pred: Any = None     # low-passed (obs eligibility * reward prediction) -> prediction-stream credit matrix
+    critic_lr_scale: float = 1.0  # critic (reward-predictor) LR multiplier; <1 -> critic learns slower
 
 
-def init_opt(params : Any, learning_rate : float):
-    # Initialize optimizer
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(0.5),   # try values 0.3 – 1.0 depending on stability
-        optax.apply_if_finite(
-            optax.adam(learning_rate),
-            max_consecutive_errors=100,
-        ),
+def _critic_label_tree(params):
+    """Label each param leaf 'critic' (reward-predictor MLP) or 'actor' (everything else),
+    so the two groups can be given different learning rates via optax.multi_transform."""
+    def label(path, _leaf):
+        keys = [getattr(k, 'key', str(k)) for k in path]
+        return 'critic' if any('reward_pred' in str(k) for k in keys) else 'actor'
+    return jax.tree_util.tree_map_with_path(label, params)
+
+
+def make_optimizer(params: Any, learning_rate: float, critic_lr_scale: float = 1.0):
+    """Adam with a separate (typically smaller) learning rate for the critic/reward-predictor
+    params, wrapped in the shared global-norm clip + apply_if_finite guard."""
+    tx = optax.multi_transform(
+        {
+            'actor': optax.adam(learning_rate),
+            'critic': optax.adam(learning_rate * critic_lr_scale),
+        },
+        _critic_label_tree(params),
     )
+    return optax.chain(
+        optax.clip_by_global_norm(0.5),   # try values 0.3 – 1.0 depending on stability
+        optax.apply_if_finite(tx, max_consecutive_errors=100),
+    )
+
+
+def init_opt(params : Any, learning_rate : float, critic_lr_scale : float = 1.0):
+    # Initialize optimizer
+    optimizer = make_optimizer(params, learning_rate, critic_lr_scale)
     opt_state = optimizer.init(params)
     return opt_state
 
@@ -45,6 +67,7 @@ def create_train_state(
     num_envs: int,
     learning_rate: float,
     params: Any,
+    critic_lr_scale: float = 1.0,
 ) -> TrainState:
     """Initialize training state"""
     
@@ -59,11 +82,12 @@ def create_train_state(
 
     # Persistent per-(obs, action) credit filters (action_size fixed at 2)
     action_elig = jnp.zeros((num_envs, obs_size, 2))
-    action_credit = jnp.zeros((num_envs, obs_size, 2))
+    action_credit_reward = jnp.zeros((num_envs, obs_size, 2))
+    action_credit_pred = jnp.zeros((num_envs, obs_size, 2))
 
     return TrainState(
         params=params,
-        opt_state=init_opt(params, learning_rate),
+        opt_state=init_opt(params, learning_rate, critic_lr_scale),
         rng_key=rng_key,
         actor_hidden=actor_hidden,
         critic_hidden=critic_hidden,
@@ -73,5 +97,7 @@ def create_train_state(
         learning_rate=learning_rate,
         grads=None,
         action_elig=action_elig,
-        action_credit=action_credit,
+        action_credit_reward=action_credit_reward,
+        action_credit_pred=action_credit_pred,
+        critic_lr_scale=critic_lr_scale,
     )

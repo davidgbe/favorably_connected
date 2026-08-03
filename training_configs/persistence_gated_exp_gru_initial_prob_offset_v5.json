@@ -1,5 +1,5 @@
 {
-  "exp_name": "persistence_gated_exp_gru_initial_prob_offset_v52",
+  "exp_name": "persistence_gated_exp_gru_initial_prob_offset_v65",
   "num_envs": 256,
   "n_save_envs": 15,
   "patch_types_per_env": 3,
@@ -20,7 +20,7 @@
   "fixed_patches": [0, 0, 0],
   "reward_param_style": "fixed",
   "reward_func_type": "exp",
-  "reward_decay_consts": [10.0, 10.0, 10.0],
+  "reward_decay_consts": [20.0, 20.0, 20.0],
   "reward_prob_prefactors": [0, 0.6, 0.8],
   "reward_decay_range": [10.0, 10.0],
   "reward_prob_range": [0.05, 0.95],
@@ -30,8 +30,8 @@
   "interpatch_len_decay_rate": 0.1,
   "global_reward_weight": 0,
   "learning_rate": 1e-4,
-  "n_sessions": 200,
+  "n_sessions": 501,
   "output_save_start": 50,
-  "output_save_end": 201,
+  "output_save_end": 501,
   "output_save_step": 50
 }
