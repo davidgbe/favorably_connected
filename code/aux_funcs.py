@@ -194,6 +194,7 @@ def format_plot(
     leftspine=True,
     topspine=False,
     bottomspine=True,
+    set_xticks_bottom=True,
     ):
     
     if type(axs) is not list and type(axs) is not np.array and type(axs) is not np.ndarray:
@@ -215,8 +216,8 @@ def format_plot(
 
         ax.xaxis.label.set_size(axislabelsize)
         ax.yaxis.label.set_size(axislabelsize)
-
-        ax.xaxis.set_ticks_position('bottom')
+        if set_xticks_bottom:
+            ax.xaxis.set_ticks_position('bottom')
 
 
 def add_pc_axes(axs):
@@ -281,7 +282,7 @@ def format_pc_plot(axs):
         ax.set_xlabel('')
         ax.set_ylabel('')
     pc_axes = add_pc_axes(axs)
-    format_plot(axs, leftspine=False, bottomspine=False, ticklabelsize=16)
+    format_plot(axs, leftspine=False, bottomspine=False, ticklabelsize=16, set_xticks_bottom=False)
     format_plot(pc_axes)
 
 

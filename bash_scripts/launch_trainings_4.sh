@@ -25,6 +25,6 @@ export CUDA_VISIBLE_DEVICES=1
 #     --config training_configs/fixed_exp_gru_reward_decay_v5.json \
 #     --n_networks 1
 
-python3 code/scripts/train_treadmill_agent_jax_monotonic.py \
-    --config training_configs/monotonic_value_exp_gru_initial_prob_offset_v3.json \
+python3 code/scripts/train_treadmill_agent_jax_reward_gated_logits.py \
+    --config training_configs/persistence_gated_exp_gru_initial_prob_offset_v5.json \
     --n_networks 1

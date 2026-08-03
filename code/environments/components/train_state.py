@@ -21,6 +21,9 @@ class TrainState:
     prev_reward: jnp.ndarray   # (NUM_ENVS,)
     learning_rate: float
     grads: jnp.ndarray
+    # Persistent per-(obs, action) credit filters (continue across update blocks). (NUM_ENVS, obs_size, action_size)
+    action_elig: Any = None    # per-action low-pass of the triggering observation
+    action_credit: Any = None  # low-passed (obs eligibility * reward) -> (obs, action) credit matrix
 
 
 def init_opt(params : Any, learning_rate : float):
@@ -54,7 +57,10 @@ def create_train_state(
     prev_action = jnp.zeros((num_envs,), dtype=jnp.int32)
     prev_reward = jnp.zeros((num_envs,))
 
-    
+    # Persistent per-(obs, action) credit filters (action_size fixed at 2)
+    action_elig = jnp.zeros((num_envs, obs_size, 2))
+    action_credit = jnp.zeros((num_envs, obs_size, 2))
+
     return TrainState(
         params=params,
         opt_state=init_opt(params, learning_rate),
@@ -66,4 +72,6 @@ def create_train_state(
         prev_reward=prev_reward,
         learning_rate=learning_rate,
         grads=None,
+        action_elig=action_elig,
+        action_credit=action_credit,
     )

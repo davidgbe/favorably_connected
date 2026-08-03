@@ -45,7 +45,7 @@ def plot_session(data_path, session_idx, xlim=None, max_reward_param=30,
 
     b_data_raw = load_trajectory_data(data_path)
     b_data = parse_behavioral_data(b_data_raw[session_idx])
-    ss = get_session_summaries([b_data])[0]
+    ss = get_session_summaries([b_data], max_reward_sites=max_reward_sites)[0]
 
     rewards_at_positions = b_data['rewards_at_positions']
     reward_attempted_at_positions = b_data['reward_attempted_at_positions']
@@ -250,14 +250,14 @@ def load_odor_site_df(load_path, nn_num=0, lim=None, brief=False):
     all_session_data = get_all_session_summaries_pkl(load_path, lim=lim, brief=brief)
     odor_site_dfs = []
     for i_ss, ss in enumerate(all_session_data):
-        odor_sites_for_session = []
-        for odor_site_df in ss['all_odor_site_data']:
-            odor_sites_for_session.append(odor_site_df)
-        df = pd.concat(odor_sites_for_session)
+        # Each odor site is a plain dict of scalars; build the whole session's frame in ONE
+        # construction -- ~80x faster than creating/concatenating a DataFrame per site, and no
+        # block-fragmentation.
+        df = pd.DataFrame(ss['all_odor_site_data'])
         df['env_quality'] = np.sum(np.unique(df['patch_reward_param']))
         df['session_number'] = i_ss
         odor_site_dfs.append(df)
-    dfs = pd.concat(odor_site_dfs)
+    dfs = pd.concat(odor_site_dfs).copy()
     dfs['index / reward_param'] = dfs['index'] / (dfs['patch_reward_param'] + 1e-6)
     dfs['rewards_seen_in_patch / reward_param'] = (
         dfs['rewards_seen_in_patch'] / (dfs['patch_reward_param'] + 1e-6)
@@ -643,6 +643,91 @@ def plot_patch_statistics_across_dfs(dfs, figsize=(5, 3), xticks=None, xticklabe
     fig3.tight_layout()
 
     return fig1, ax1, fig2, ax2, fig3, ax3
+
+
+def plot_patch_type_scatter_across_dfs(dfs, patch_type_x=1, patch_type_y=2,
+                                       reduce='mean', figsize=(4, 4),
+                                       color_by_index=True, cmap='viridis',
+                                       cbar_label='df index'):
+    """Scatter a per-df patch-type-1 vs patch-type-2 statistic, one point per df.
+
+    Plots the same per-df, per-patch-type quantities as
+    ``plot_patch_statistics_across_dfs`` (mean rewards collected per patch, mean
+    stops per patch), but as a patch-type-1 vs patch-type-2 scatter instead of
+    lines vs df index. Produces two figures, each with x = ``patch_type_x`` and
+    y = ``patch_type_y`` and one point per df in ``dfs``:
+      1. Rewards collected per patch type.
+      2. Patch stops per patch type.
+
+    Parameters
+    ----------
+    dfs : list of odor-site DataFrames (e.g. one per checkpoint / network).
+    patch_type_x, patch_type_y : which patch types go on the x and y axes.
+    reduce : 'mean' -> mean per patch (matches plot_patch_statistics_across_dfs);
+                       the default.
+             'sum'  -> total over the df (number of rewards / stops).
+    color_by_index : colour each point by its index in ``dfs`` (df / training
+                     order) with a colourbar.
+    cbar_label : label for that colourbar (default 'df index').
+    """
+    if reduce not in ('sum', 'mean'):
+        raise ValueError("reduce must be 'sum' or 'mean'")
+
+    rewards_x, rewards_y, stops_x, stops_y = [], [], [], []
+    for df in dfs:
+        # Per-patch rewards collected (cumulative max within each patch) and stops.
+        patch_rewards = (
+            df.groupby(['session_number', 'patch_number', 'patch_type'])['rewards_seen_in_patch']
+            .max().reset_index()
+        )
+        patch_stops = (
+            df.groupby(['session_number', 'patch_number', 'patch_type'])['stopped']
+            .sum().reset_index()
+        )
+
+        rewards_by_type = patch_rewards.groupby('patch_type')['rewards_seen_in_patch'].agg(reduce)
+        stops_by_type = patch_stops.groupby('patch_type')['stopped'].agg(reduce)
+
+        rewards_x.append(float(rewards_by_type.get(patch_type_x, 0.0)))
+        rewards_y.append(float(rewards_by_type.get(patch_type_y, 0.0)))
+        stops_x.append(float(stops_by_type.get(patch_type_x, 0.0)))
+        stops_y.append(float(stops_by_type.get(patch_type_y, 0.0)))
+
+    idx = np.arange(len(dfs))
+    stat_label = 'Total' if reduce == 'sum' else 'Mean'
+
+    def _scatter(xvals, yvals, quantity):
+        fig, ax = plt.subplots(figsize=figsize)
+        if color_by_index and len(dfs) > 1:
+            sc = ax.scatter(xvals, yvals, c=idx, cmap=cmap, s=30,
+                            edgecolor='k', linewidth=0.4)
+            fig.colorbar(sc, ax=ax, label=cbar_label)
+        else:
+            ax.scatter(xvals, yvals, s=30, color='steelblue',
+                       edgecolor='k', linewidth=0.4)
+        # Least-squares line of best fit (y on x).
+        if len(xvals) >= 2 and np.std(xvals) > 0:
+            slope, intercept = np.polyfit(xvals, yvals, 1)
+            xr = np.array([min(xvals), max(xvals)])
+            ax.plot(xr, slope * xr + intercept, color='grey', ls='--', lw=0.8, zorder=-1)
+        ax.set_xlabel(f'Patch type {patch_type_x} {quantity.lower()}')
+        ax.set_ylabel(f'Patch type {patch_type_y} {quantity.lower()}')
+
+        # Pearson correlation across dfs (needs >= 2 points with variance).
+        title = f'{stat_label} {quantity.lower()}'
+        if len(xvals) >= 2 and np.std(xvals) > 0 and np.std(yvals) > 0:
+            r, p = stats.pearsonr(xvals, yvals)
+            ax.text(0.03, 0.97, f'r = {r:.2f}\np = {p:.2g}',
+                    transform=ax.transAxes, ha='left', va='top', fontsize=9)
+        ax.set_title(title, fontsize=9)
+        format_plot(ax)
+        fig.tight_layout()
+        return fig, ax
+
+    fig_rewards, ax_rewards = _scatter(rewards_x, rewards_y, 'Rewards collected')
+    fig_stops, ax_stops = _scatter(stops_x, stops_y, 'Patch stops')
+
+    return fig_rewards, ax_rewards, fig_stops, ax_stops
 
 
 def plot_first_patch_rewards_vs_other_prefactors(df, first_patch_type=None, figsize=(4, 3.5)):
@@ -1117,6 +1202,7 @@ def plot_stop_fraction(df, x_col, y_col, condition=None, invert_y=True,
                        figsize=(5, 5), reverse=False, label=None, cmap='YlGnBu',
                        xlabel=None, ylabel=None, high_res_save=False, min_n=1,
                        vmin=0, vmax=1, show_counts=True, counts_cmap='magma',
+                       show_cumulative=True, cumulative_xlabel='Cumulative Failures',
                        max_ticks=8):
     """Heatmap of P(stop) over two columns in df.
 
@@ -1124,6 +1210,13 @@ def plot_stop_fraction(df, x_col, y_col, condition=None, invert_y=True,
     show_counts : if True, also draw a second heatmap of the sample count per
                   bin (same bins/min_n filter as the probability plot).
     counts_cmap : colormap for the counts heatmap.
+    show_cumulative : if True, directly after the first heatmap draw the SAME
+                  P(stop) data in the space of (cumulative failures, y_col),
+                  using the same colour scheme. Cumulative failures per site are
+                  derived within each patch as (site ordinal) - (cumulative
+                  rewards) = groupby(session, patch).cumcount() - y_col. Requires
+                  'session_number' and 'patch_number' columns.
+    cumulative_xlabel : x-axis label for that cumulative-failures heatmap.
     max_ticks : max number of tick labels per axis (labels are thinned evenly
                 so they don't overlap when there are many bins).
     """
@@ -1169,6 +1262,37 @@ def plot_stop_fraction(df, x_col, y_col, condition=None, invert_y=True,
     format_plot(cbar.ax, bottomspine=False, leftspine=False, ticklabelsize=14)
     _thin_ticks(ax, heatmap_data.columns, heatmap_data.index)
     matrix = 1 - heatmap_data if reverse else heatmap_data
+
+    # Directly after the first heatmap: the SAME P(stop) data, but in the space of
+    # cumulative failures (x) and cumulative rewards (y_col). Cumulative failures per site
+    # = (site ordinal within patch) - (cumulative rewards) = cumcount() - y_col. Same colour
+    # scheme (cmap / vmin / vmax / reverse / label) as the first heatmap.
+    if show_cumulative and {'session_number', 'patch_number'}.issubset(df.columns):
+        df_cum = df.copy()
+        df_cum['cumulative_misses'] = (
+            df_cum.groupby(['session_number', 'patch_number']).cumcount() - df_cum[y_col]
+        ).clip(lower=0)
+        filtered_c = df_cum.groupby([y_col, 'cumulative_misses']).filter(lambda g: len(g) >= min_n)
+        grouped_c = (
+            filtered_c
+              .groupby([y_col, 'cumulative_misses'])['stopped']
+              .mean()
+              .reset_index()
+        )
+        heatmap_c = grouped_c.pivot(index=y_col, columns='cumulative_misses', values='stopped')
+
+        fig_cum, ax_cum = plt.subplots(figsize=figsize, dpi=300 if high_res_save else 100)
+        sns.heatmap(1 - heatmap_c if reverse else heatmap_c,
+                    cmap=cmap, vmin=vmin, vmax=vmax,
+                    cbar_kws={'label': label}, ax=ax_cum)
+        ax_cum.set_xlabel(cumulative_xlabel)
+        ax_cum.set_ylabel(ylabel if ylabel is not None else y_col.replace('_', ' '))
+        if invert_y:
+            ax_cum.invert_yaxis()
+        format_plot(ax_cum, bottomspine=False, leftspine=False, ticklabelsize=14)
+        cbar_cum = ax_cum.collections[0].colorbar
+        format_plot(cbar_cum.ax, bottomspine=False, leftspine=False, ticklabelsize=14)
+        _thin_ticks(ax_cum, heatmap_c.columns, heatmap_c.index)
 
     counts_matrix = None
     if show_counts:

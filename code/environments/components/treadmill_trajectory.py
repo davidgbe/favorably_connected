@@ -46,6 +46,8 @@ class TrajectoryData:
     exp_filtered_reward_rate: jnp.ndarray
     pred_reward_rate: jnp.ndarray
 
+    credit_for_action: Optional[jnp.ndarray] = None  # (num_envs, n_steps) credit of the taken action
+
 
 @partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'n_steps', 'obs_size', 'intervention_fn'])
 def collect_trajectory(
@@ -122,8 +124,11 @@ def collect_trajectory(
         new_obs, new_env_states, rewards, dones, infos = step_results
 
         new_step_num = step_num + 1
-        new_reward_rate = (new_env_states.exp_filtered_reward_rate
-                           + (rewards - new_env_states.exp_filtered_reward_rate) / new_step_num)
+        beta = 0.02
+        new_reward_rate = (
+            (1 - beta) * new_env_states.exp_filtered_reward_rate 
+            + beta * rewards
+        )
 
         new_env_states = new_env_states.replace(
             exp_filtered_reward_rate=new_reward_rate,

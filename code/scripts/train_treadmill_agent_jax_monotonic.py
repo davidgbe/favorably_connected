@@ -57,6 +57,7 @@ class RewardParamStyle(IntEnum):
     INDEP = 1
     COUPLED = 2
     PER_PATCH_INDEP = 3
+    PER_PATCH_INDEP_FIXED_OFFSET = 4
 
 
 class RewardFuncType(IntEnum):
@@ -66,8 +67,8 @@ class RewardFuncType(IntEnum):
 
 
 # Compile-time constants for JAX JIT compatibility
-N_UPDATES_PER_SESSION = 100
-N_STEPS_PER_UPDATE = 200
+N_UPDATES_PER_SESSION = 1000
+N_STEPS_PER_UPDATE = 20
 
 
 def compute_a2c_loss(
@@ -146,28 +147,15 @@ def compute_a2c_loss(
         + jnp.linalg.norm(trajectory.critic_hidden, axis=2).mean()
     )
 
-    # Monotonicity: the critic value must not drop when the (binary) reward input
-    # is 1 vs 0.  Reward is the last input channel; recompute the value at every
-    # visited (input, hidden) state with that channel forced to 0 and to 1.
-    mono_net = A2CRNNFlax(
-        action_size=2, hidden_size=hidden_size,
-        unit_noise_std=unit_noise_std, rnn_type=rnn_type, obs_size=obs_size,
+    # Temporal monotonicity: after a reward is received (r_t > 0), the critic value
+    # should not drop, i.e. v_{t+1} >= v_t. Penalize the negative part of (v_{t+1} - v_t)
+    # at exactly the timesteps where a reward was collected.
+    dv = values[:, 1:] - values[:, :-1]                 # v_{t+1} - v_t   (num_envs, n_steps-1)
+    reward_mask = (trajectory.observations[:, :-1, 6] > 0.5)    # r_t > 0
+    drop = jax.nn.relu(-dv)                             # > 0 only when the value decreased
+    monotonicity_loss = (
+        jnp.sum(reward_mask * drop ** 2) / (jnp.sum(reward_mask) + 1e-6)
     )
-    _mono_X  = lax.stop_gradient(
-        trajectory.observations.reshape(-1, trajectory.observations.shape[-1]))
-    _mono_AH = lax.stop_gradient(trajectory.actor_hidden.reshape(-1, hidden_size))
-    _mono_CH = lax.stop_gradient(trajectory.critic_hidden.reshape(-1, hidden_size))
-
-    def _critic_value(x):
-        # fixed noise key for the reward=0/1 forwards so the hidden noise cancels
-        return mono_net.apply(
-            params, x, _mono_AH, _mono_CH,
-            rngs={'noise': jax.random.PRNGKey(0)},
-        )[1]
-
-    _v_no_reward   = _critic_value(_mono_X.at[:, -1].set(0.0))
-    _v_with_reward = _critic_value(_mono_X.at[:, -1].set(1.0))
-    monotonicity_loss = jnp.mean(jax.nn.relu(_v_no_reward - _v_with_reward) ** 2)
 
     total_loss = (
         actor_loss
@@ -312,7 +300,7 @@ def train_step(
     optimizer = optax.chain(
         optax.clip_by_global_norm(0.5),   # try values 0.3 – 1.0 depending on stability
         optax.apply_if_finite(
-            optax.adam(train_state.learning_rate),
+            optax.sgd(train_state.learning_rate),
             max_consecutive_errors=100,
         ),
     )

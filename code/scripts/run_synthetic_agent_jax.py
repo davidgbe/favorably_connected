@@ -34,6 +34,8 @@ class RewardParamStyle(IntEnum):
     FIXED = 0
     INDEP = 1
     COUPLED = 2
+    PER_PATCH_INDEP = 3
+    PER_PATCH_INDEP_FIXED_OFFSET = 4
 
 
 class RewardFuncType(IntEnum):

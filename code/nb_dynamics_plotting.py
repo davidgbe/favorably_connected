@@ -5911,11 +5911,12 @@ def plot_reward_pattern_results(
     # --- Patch-progress vs time ---
     fig_pp = None
     if tte_data is not None:
-        fig_pp, (ax_un, ax_re) = plt.subplots(1, 2, figsize=(8, 3), sharey=True)
+        fig_pp, (ax_un, ax_re) = plt.subplots(1, 2, figsize=(8, 3), sharey=True, sharex=True)
         ax_un.set_title('Unrewarded', fontsize=8)
         ax_re.set_title('Rewarded',   fontsize=8)
         for ax_ctx in (ax_un, ax_re):
             ax_ctx.set_xlabel('Time step', fontsize=8)
+            ax_ctx.set_xlim(0, 400)
         ax_un.set_ylabel('Patch progress', fontsize=8)
         ctx_axes = {True: ax_re, False: ax_un}
 

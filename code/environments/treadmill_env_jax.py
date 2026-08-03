@@ -9,7 +9,10 @@ from functools import partial
 # Integer flags for reward_param_style; mirror RewardParamStyle in
 # scripts/train_treadmill_agent_jax.py. per_patch_indep resamples reward
 # params (indep-style) at each new patch render rather than once per reset.
+# per_patch_indep_fixed_offset does the same but only resamples the decay
+# rates, keeping the configured prefactors untouched.
 REWARD_PARAM_STYLE_PER_PATCH_INDEP = 3
+REWARD_PARAM_STYLE_PER_PATCH_INDEP_FIXED_OFFSET = 4
 
 
 @struct.dataclass
@@ -141,6 +144,15 @@ def TreadmillEnvironment():
         new_reward_prob_prefactors = jnp.where(params.fixed_patches, params.reward_prob_prefactors, sampled_prefactors)
         return reward_params, new_reward_prob_prefactors
 
+    def new_reward_params_indep_fixed_offset(key, params):
+        """Resample decay consts per patch (indep-style) but keep configured prefactors.
+
+        Same decay draw as new_reward_params_indep; the prefactors are left at their
+        configured values (never resampled) so only the decay rate varies per patch.
+        """
+        reward_params, _ = new_reward_params_indep(key, params)
+        return reward_params, params.reward_prob_prefactors
+
     @jax.jit
     def reset(
         key: jnp.ndarray, 
@@ -177,6 +189,7 @@ def TreadmillEnvironment():
                 new_reward_params_indep,
                 new_reward_params_coupled,
                 new_reward_params_indep,  # per_patch_indep: first patch is a fresh indep draw
+                new_reward_params_indep_fixed_offset,  # per_patch_indep_fixed_offset: fresh decay draw, configured prefactors
 
             ),
             subkey_reward_param,
@@ -370,12 +383,20 @@ def TreadmillEnvironment():
 
                 new_patch_start = s.current_patch.current_reward_site_end + interpatch_len
 
-                # per_patch_indep: redraw reward params for the incoming patch.
-                # All other styles keep the session-level arrays (no-op).
-                reward_params_new, reward_prob_prefactors_new = lax.cond(
-                    params.reward_param_style == REWARD_PARAM_STYLE_PER_PATCH_INDEP,
-                    lambda: new_reward_params_indep(subkey_rp, params),
-                    lambda: (s.reward_params, s.reward_prob_prefactors),
+                # per_patch_indep styles redraw reward params for the incoming patch:
+                #   style 3 redraws decay + prefactors, style 4 redraws decay only
+                #   (configured prefactors). All other styles keep the session-level
+                #   arrays (no-op). lax.switch branches are indexed by reward_param_style.
+                keep_params = lambda: (s.reward_params, s.reward_prob_prefactors)
+                reward_params_new, reward_prob_prefactors_new = lax.switch(
+                    params.reward_param_style,
+                    (
+                        keep_params,                                                   # 0 fixed
+                        keep_params,                                                   # 1 indep
+                        keep_params,                                                   # 2 coupled
+                        lambda: new_reward_params_indep(subkey_rp, params),            # 3 per_patch_indep
+                        lambda: new_reward_params_indep_fixed_offset(subkey_rp, params),  # 4 per_patch_indep_fixed_offset
+                    ),
                 )
 
                 patch_state = generate_patch(patch_num, new_patch_start, reward_params_new, reward_prob_prefactors_new)
