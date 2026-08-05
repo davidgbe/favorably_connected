@@ -24,7 +24,8 @@ class A2CRNNFlax(nn.Module):
     rnn_type: str = 'GRU'
     unit_noise_std: float = 1e-2
     init_scale: float = 1.0
-    reward_pred_hidden_size: int = 64
+    reward_pred_hidden_size: int = 12
+    reward_pred_init_scale: int = 0.001
 
     def setup(self):
         if self.rnn_type == 'VANILLA':
@@ -48,9 +49,9 @@ class A2CRNNFlax(nn.Module):
         self.integration_prediction = nn.Dense(1, kernel_init=nn.initializers.orthogonal(scale=self.init_scale))
 
         # k-window reward-predictor MLP (input = flattened [obs, self-action] window).
-        self.reward_pred_l1 = nn.Dense(self.reward_pred_hidden_size, kernel_init=nn.initializers.orthogonal(scale=self.init_scale))
-        self.reward_pred_l2 = nn.Dense(self.reward_pred_hidden_size, kernel_init=nn.initializers.orthogonal(scale=self.init_scale))
-        self.reward_pred_out = nn.Dense(1, kernel_init=nn.initializers.orthogonal(scale=self.init_scale))
+        self.reward_pred_l1 = nn.Dense(self.reward_pred_hidden_size, kernel_init=nn.initializers.orthogonal(scale=self.reward_pred_init_scale))
+        self.reward_pred_l2 = nn.Dense(self.reward_pred_hidden_size, kernel_init=nn.initializers.orthogonal(scale=self.reward_pred_init_scale))
+        self.reward_pred_out = nn.Dense(1, kernel_init=nn.initializers.orthogonal(scale=self.reward_pred_init_scale))
 
     def __call__(self, x, actor_hidden, critic_hidden):
         new_actor_hidden, actor_outputs = self.rnn_actor(actor_hidden, x)

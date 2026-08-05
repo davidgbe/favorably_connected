@@ -66,9 +66,6 @@ class RewardFuncType(IntEnum):
     MARKOV = 2
 
 
-# Compile-time constants for JAX JIT compatibility
-N_UPDATES_PER_SESSION = 100
-N_STEPS_PER_UPDATE = 200
 
 
 def compute_a2c_loss(
@@ -88,6 +85,8 @@ def compute_a2c_loss(
     unit_noise_std: float,
     rnn_type: str,
     obs_size: int,
+    n_steps_per_update: int,
+    normalize_advantages: bool,
 ) -> Tuple[jnp.ndarray, Tuple[Dict[str, jnp.ndarray], Any, Any]]:
     """Compute A2C loss; collect_trajectory is called here so BPTT flows through the scan."""
 
@@ -100,7 +99,7 @@ def compute_a2c_loss(
         rnn_type=rnn_type,
         hidden_size=hidden_size,
         obs_size=obs_size,
-        n_steps=N_STEPS_PER_UPDATE,
+        n_steps=n_steps_per_update,
     )
 
     logits = trajectory.logits   # (num_envs, n_steps, action_size)
@@ -110,7 +109,8 @@ def compute_a2c_loss(
         trajectory.rewards, gamma, lax.stop_gradient(values[:, -1])
     )
     advantages = returns - values
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
+    if normalize_advantages:
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
 
     log_probs = jax.nn.log_softmax(logits)
     chosen_log_probs = jnp.take_along_axis(
@@ -238,7 +238,7 @@ def compute_gaes(rewards, values, gamma, lam):
     ), axis=1)
 
 
-@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'obs_size'])
+@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'obs_size', 'n_steps_per_update', 'normalize_advantages'])
 def train_step(
     train_state: TrainState,
     env_states: TreadmillEnvState,
@@ -256,6 +256,8 @@ def train_step(
     unit_noise_std: float,
     rnn_type: str,
     obs_size: int,
+    n_steps_per_update: int,
+    normalize_advantages: bool,
 ) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
     """Single training step"""
     
@@ -277,6 +279,8 @@ def train_step(
         unit_noise_std,
         rnn_type,
         obs_size,
+        n_steps_per_update,
+        normalize_advantages,
     )
 
     metrics['grad_norm'] = optax.global_norm(grads)
@@ -347,6 +351,9 @@ class TrainingConfig:
     # Training params (runtime configurable)
     seed: int = 0
     n_sessions: int = 5000
+    n_updates_per_session: int = 100
+    n_steps_per_update: int = 200
+    normalize_advantages: bool = True
 
     # Logging
     output_state_save_rate: int = 100
@@ -392,7 +399,7 @@ def load_config_from_json(filepath: str) -> TrainingConfig:
     return config.replace(**config_dict)
 
 
-@partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'unit_noise_std', 'rnn_type', 'obs_size'])
+@partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'unit_noise_std', 'rnn_type', 'obs_size', 'n_updates_per_session', 'n_steps_per_update', 'normalize_advantages'])
 def run_session_updates_with_metrics(
     train_state: TrainState,
     env_states: TreadmillEnvState,
@@ -410,12 +417,15 @@ def run_session_updates_with_metrics(
     unit_noise_std: float,
     rnn_type: str,
     obs_size: int,
+    n_updates_per_session: int,
+    n_steps_per_update: int,
+    normalize_advantages: bool,
 ) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
     """Run all training updates with full metrics collection"""
-    
+
     def update_step(carry, _):
         train_state, env_states = carry
-        
+
         new_train_state, new_env_states, metrics = train_step(
             train_state=train_state,
             env_states=env_states,
@@ -433,16 +443,18 @@ def run_session_updates_with_metrics(
             unit_noise_std=unit_noise_std,
             rnn_type=rnn_type,
             obs_size=obs_size,
+            n_steps_per_update=n_steps_per_update,
+            normalize_advantages=normalize_advantages,
         )
-        
+
         return (new_train_state, new_env_states), metrics
-    
+
     # Run scan over all updates
     (final_train_state, final_env_states), all_metrics = lax.scan(
         update_step,
         (train_state, env_states),
         None,
-        length=N_UPDATES_PER_SESSION,
+        length=n_updates_per_session,
     )
 
     # jax.debug.print('grad_norm: {x}', x=all_metrics['grad_norm'])
@@ -460,8 +472,8 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
     print("Starting JAX A2C Training...")
     print(f"Num envs: {config.num_envs}")
     print(f"Sessions: {config.n_sessions}")
-    print(f"Updates per session: {N_UPDATES_PER_SESSION}")
-    print(f"Steps per update: {N_STEPS_PER_UPDATE}")
+    print(f"Updates per session: {config.n_updates_per_session}")
+    print(f"Steps per update: {config.n_steps_per_update}")
 
     # Initialize everything
     rng_key = random.key(config.seed)
@@ -546,7 +558,7 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
     # Training loop (outer loop stays in Python for logging)
     for session_num in trange(config.n_sessions, desc='Sessions'):
         
-        avg_rewards_per_update = np.empty((config.num_envs, N_UPDATES_PER_SESSION))
+        avg_rewards_per_update = np.empty((config.num_envs, config.n_updates_per_session))
         all_info = []
 
         # Reset environment for new episode
@@ -581,6 +593,9 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
             unit_noise_std=config.unit_noise_std,
             rnn_type=config.rnn_type,
             obs_size=config.obs_size,
+            n_updates_per_session=config.n_updates_per_session,
+            n_steps_per_update=config.n_steps_per_update,
+            normalize_advantages=config.normalize_advantages,
         )
 
         # pprint(train_state.params)
@@ -660,7 +675,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
         dwell_time_for_reward=config.dwell_time_for_reward,
     )
 
-    session_steps = N_UPDATES_PER_SESSION * N_STEPS_PER_UPDATE
+    session_steps = config.n_updates_per_session * config.n_steps_per_update
 
     net_init_key, rng_key = random.split(rng_key)
 
