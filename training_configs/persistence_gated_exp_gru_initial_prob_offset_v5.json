@@ -1,5 +1,5 @@
 {
-  "exp_name": "persistence_gated_exp_gru_initial_prob_offset_mult_by_final_r_v2",
+  "exp_name": "persistence_gated_exp_gru_initial_prob_offset_mult_by_final_r_v3",
   "num_envs": 256,
   "n_save_envs": 15,
   "patch_types_per_env": 3,
@@ -29,7 +29,7 @@
   "interpatch_len_bounds": [1.0, 12.0],
   "interpatch_len_decay_rate": 0.1,
   "global_reward_weight": 0,
-  "learning_rate": 1e-3,
+  "learning_rate": 1e-4,
   "reward_pred_lr_scale": 1.0,
   "n_sessions": 1001,
   "output_save_start": 100,
