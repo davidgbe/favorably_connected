@@ -26,6 +26,7 @@ class A2CRNNFlax(nn.Module):
     init_scale: float = 1.0
     reward_pred_hidden_size: int = 12
     reward_pred_init_scale: int = 0.001
+    reward_pred_horizon: int = 21   # number of lag outputs (RPE_H + 1); linear readout from hidden state
 
     def setup(self):
         if self.rnn_type == 'VANILLA':
@@ -48,10 +49,9 @@ class A2CRNNFlax(nn.Module):
         self.obs_prediction = nn.Dense(self.obs_size + 1, kernel_init=nn.initializers.orthogonal(scale=self.init_scale))
         self.integration_prediction = nn.Dense(1, kernel_init=nn.initializers.orthogonal(scale=self.init_scale))
 
-        # k-window reward-predictor MLP (input = flattened [obs, self-action] window).
-        self.reward_pred_l1 = nn.Dense(self.reward_pred_hidden_size, kernel_init=nn.initializers.orthogonal(scale=self.reward_pred_init_scale))
-        self.reward_pred_l2 = nn.Dense(self.reward_pred_hidden_size, kernel_init=nn.initializers.orthogonal(scale=self.reward_pred_init_scale))
-        self.reward_pred_out = nn.Dense(1, kernel_init=nn.initializers.orthogonal(scale=self.reward_pred_init_scale))
+        # reward-predictor: a linear readout from the actor hidden state -> (H+1) future-reward lags.
+        self.reward_pred_readout = nn.Dense(self.reward_pred_horizon,
+                                            kernel_init=nn.initializers.orthogonal(scale=self.reward_pred_init_scale))
 
     def __call__(self, x, actor_hidden, critic_hidden):
         new_actor_hidden, actor_outputs = self.rnn_actor(actor_hidden, x)
@@ -70,30 +70,29 @@ class A2CRNNFlax(nn.Module):
         return (logits, value, new_actor_hidden, new_critic_hidden,
                 pred_env_quality, obs_pred, pred_exp_filtered_reward_rate)
 
-    def predict_reward(self, window):
-        """window: (..., feat) reward-predictor input. As used by the conditional critic this is
-        [flattened k-window of obs ending at s, anchor-action one-hot, normalized lag j], and the
-        output is the reward predicted at s given that action was taken j steps earlier.
-        Generic MLP over the last axis. Returns (...,) predicted reward."""
-        h = nn.relu(self.reward_pred_l1(window))
-        h = nn.relu(self.reward_pred_l2(h))
-        return self.reward_pred_out(h).squeeze(-1)
+    def predict_reward(self, hidden):
+        """Linear readout of the actor hidden state -> predicted reward at lags 0..H.
+        hidden: (..., hidden_size). Returns (..., reward_pred_horizon)."""
+        return self.reward_pred_readout(hidden)
 
     def init_all(self, x, actor_hidden, critic_hidden, window):
-        """Exercise every submodule so init creates all params (actor + reward predictor)."""
+        """Exercise every submodule so init creates all params (actor + reward readout).
+        `window` is unused (kept for signature compatibility); the readout is on the hidden state."""
         self.__call__(x, actor_hidden, critic_hidden)
-        self.predict_reward(window)
+        self.predict_reward(actor_hidden)
         return 0
 
 
 def init_network_and_params(hidden_size, action_size, obs_size, rnn_type, unit_noise_std,
-                            rng_key, init_scale=1.0, reward_pred_hidden_size=64, window_dim=None):
+                            rng_key, init_scale=1.0, reward_pred_hidden_size=64, window_dim=None,
+                            reward_pred_horizon=21):
     input_size = obs_size + action_size + 1
     if window_dim is None:
-        window_dim = obs_size + action_size            # k=1 fallback
+        window_dim = obs_size + action_size            # unused (readout is on the hidden state)
     network = A2CRNNFlax(action_size=action_size, obs_size=obs_size, hidden_size=hidden_size,
                          rnn_type=rnn_type, unit_noise_std=unit_noise_std, init_scale=init_scale,
-                         reward_pred_hidden_size=reward_pred_hidden_size)
+                         reward_pred_hidden_size=reward_pred_hidden_size,
+                         reward_pred_horizon=reward_pred_horizon)
     param_key, noise_key = random.split(rng_key, 2)
     dummy_input = jnp.zeros((1, input_size))
     dummy_hidden = jnp.zeros((1, hidden_size))

@@ -1320,3 +1320,85 @@ def plot_stop_fraction(df, x_col, y_col, condition=None, invert_y=True,
         _thin_ticks(ax_c, counts_matrix.columns, counts_matrix.index)
 
     return fig, ax, matrix, counts_matrix
+
+
+def plot_leave_prob_by_failures(dfs, patch_types=(1, 2), n_failures=(0, 1, 2),
+                                failures_col='consecutive_misses', stopped_col='stopped',
+                                rewards_seen_col='rewards_seen_in_patch', rewards_seen=0,
+                                figsize=(3.3, 3.3), ax=None, xlabel='Number of failures',
+                                ylabel='P(leave)', high_res_save=False, marker='o', capsize=4,
+                                show_points=True, point_jitter=0.06, point_alpha=0.45, point_size=25):
+    """Line plot of leave probability vs. number of (consecutive) failures, one line per patch type.
+
+    A leave at a reward site is `stopped == 0` (the agent did not attempt the site), so
+    P(leave) = 1 - mean(stopped). For each patch_type and each value in `n_failures` we take the rows
+    with `failures_col == n` (and, when `rewards_seen` is not None, also `rewards_seen_col ==
+    rewards_seen` -- by default 0, i.e. no rewards collected yet in the patch).
+    `dfs` may be a single DataFrame or a list of them (one per network);
+    each network contributes one P(leave) estimate per point, the plotted point is the mean across
+    networks, and the error bar is the SEM across networks (falling back to the binomial SEM of the
+    pooled data when there is only one network). Line colours come from odor_colors[patch_type].
+
+    With `show_points`, each network's individual P(leave) is also scattered (small deterministic
+    x-jitter) behind the mean line.
+
+    Returns (ax, results) where results[patch_type] = dict(n_failures, mean, sem, points), and
+    `points[i]` is the array of per-network P(leave) values at n_failures[i].
+    """
+    if isinstance(dfs, pd.DataFrame):
+        dfs = [dfs]
+
+    if ax is None:
+        _, ax = plt.subplots(figsize=figsize, dpi=300 if high_res_save else 100)
+
+    x = np.asarray(n_failures, dtype=float)
+    results = {}
+    for pt in patch_types:
+        means, sems, points = [], [], []
+        for n in n_failures:
+            per_net = []
+            pooled_leaves, pooled_total = 0, 0
+            for df in dfs:
+                mask = (df['patch_type'] == pt) & (df[failures_col] == n)
+                if rewards_seen is not None:
+                    mask &= (df[rewards_seen_col] == rewards_seen)
+                sub = df[mask]
+                if len(sub) == 0:
+                    continue
+                per_net.append(1.0 - sub[stopped_col].mean())
+                pooled_leaves += int((sub[stopped_col] == 0).sum())
+                pooled_total += len(sub)
+            per_net = np.asarray(per_net, dtype=float)
+            points.append(per_net)
+            if per_net.size == 0:
+                means.append(np.nan); sems.append(np.nan); continue
+            means.append(per_net.mean())
+            if per_net.size > 1:
+                sems.append(per_net.std(ddof=1) / np.sqrt(per_net.size))   # SEM across networks
+            else:
+                p = pooled_leaves / pooled_total                            # single network -> binomial SEM
+                sems.append(np.sqrt(p * (1 - p) / pooled_total))
+        means, sems = np.asarray(means), np.asarray(sems)
+
+        # individual per-network points (deterministic jitter so overlapping networks separate)
+        if show_points:
+            for n, per_net in zip(n_failures, points):
+                if per_net.size == 0:
+                    continue
+                offs = (np.linspace(-point_jitter, point_jitter, per_net.size)
+                        if per_net.size > 1 else np.array([0.0]))
+                ax.scatter(n + offs, per_net, s=point_size, color=odor_colors[pt],
+                           alpha=point_alpha, edgecolors='none', zorder=1)
+
+        ax.errorbar(x, means, yerr=sems, marker=marker, capsize=capsize,
+                    color=odor_colors[pt], label=f'patch type {pt}', zorder=3)
+        results[pt] = {'n_failures': np.asarray(n_failures), 'mean': means,
+                       'sem': sems, 'points': points}
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(list(n_failures))
+    ax.set_ylim(-0.02, 1.02)
+    ax.legend(frameon=False, fontsize=12)
+    format_plot(ax, ticklabelsize=14)
+    return ax, results

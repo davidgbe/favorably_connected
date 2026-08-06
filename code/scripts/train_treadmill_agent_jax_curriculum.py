@@ -35,8 +35,6 @@ from environments.treadmill_env_jax import (
     treadmill_session_default_params,
 )
 from train_treadmill_agent_jax import (
-    N_UPDATES_PER_SESSION,
-    N_STEPS_PER_UPDATE,
     run_session_updates_with_metrics,
     reward_param_style_str_to_int,
     reward_func_type_str_to_int,
@@ -87,6 +85,9 @@ class CurriculumConfig:
     init_scale: float = 1.0
     seed: int = 0
     n_save_envs: int = 1
+    n_steps_per_update: int = 200
+    n_updates_per_session: int = 100
+    normalize_advantages: bool = True
     init_checkpoint: str = None
     curriculum: List[CurriculumStep] = field(default_factory=list)
 
@@ -132,7 +133,7 @@ def train_curriculum(config: CurriculumConfig, checkpoint_path: str = None):
     print(f"Starting curriculum training: {config.exp_name}")
     print(f"  {len(config.curriculum)} steps, {total_sessions} total sessions")
     print(f"  Num envs: {config.num_envs}, hidden: {config.hidden_size}")
-    print(f"  Updates/session: {N_UPDATES_PER_SESSION}, steps/update: {N_STEPS_PER_UPDATE}")
+    print(f"  Updates/session: {config.n_updates_per_session}, steps/update: {config.n_steps_per_update}")
 
     rng_key = random.key(config.seed)
     net_init_key, rng_key = random.split(rng_key)
@@ -230,6 +231,9 @@ def train_curriculum(config: CurriculumConfig, checkpoint_path: str = None):
                 unit_noise_std=config.unit_noise_std,
                 rnn_type=config.rnn_type,
                 obs_size=config.obs_size,
+                n_updates_per_session=config.n_updates_per_session,
+                n_steps_per_update=config.n_steps_per_update,
+                normalize_advantages=config.normalize_advantages,
             )
 
             avg_rewards = all_metrics['mean_reward']
@@ -269,7 +273,7 @@ def train_curriculum(config: CurriculumConfig, checkpoint_path: str = None):
                     rnn_type=config.rnn_type,
                     hidden_size=config.hidden_size,
                     obs_size=config.obs_size,
-                    n_steps=N_UPDATES_PER_SESSION * N_STEPS_PER_UPDATE,
+                    n_steps=config.n_updates_per_session * config.n_steps_per_update,
                 )
                 traj_dicts = [
                     serialization.to_state_dict(

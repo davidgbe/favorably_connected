@@ -1,5 +1,5 @@
 {
-  "exp_name": "persistence_gated_exp_gru_initial_prob_offset_pred_r_full_v5_sub_r_pred",
+  "exp_name": "persistence_gated_exp_gru_markov_pred_r_full",
   "num_envs": 256,
   "n_save_envs": 15,
   "patch_types_per_env": 3,
@@ -18,12 +18,12 @@
   "dwell_time_for_reward": 3,
   "reward_site_len": 3,
   "fixed_patches": [0, 0, 0],
-  "reward_param_style": "fixed",
-  "reward_func_type": "exp",
+  "reward_param_style": "indep",
+  "reward_func_type": "markov",
   "reward_decay_consts": [20.0, 20.0, 20.0],
   "reward_prob_prefactors": [0, 0.6, 0.8],
-  "reward_decay_range": [10.0, 10.0],
-  "reward_prob_range": [0.05, 0.95],
+  "reward_decay_range": [0.9, 0.9],
+  "reward_prob_range": [0.7, 0.7],
   "interreward_len_bounds": [1.0, 6.0],
   "interreward_len_decay_rate": 0.8,
   "interpatch_len_bounds": [1.0, 12.0],
@@ -36,3 +36,5 @@
   "output_save_end": 501,
   "output_save_step": 100
 }
+
+

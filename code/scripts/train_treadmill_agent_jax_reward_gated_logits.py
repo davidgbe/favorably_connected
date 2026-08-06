@@ -119,6 +119,7 @@ def collect_trajectory(
         rnn_type=rnn_type,
         obs_size=obs_size,
         reward_pred_hidden_size=REWARD_PRED_HIDDEN,
+        reward_pred_horizon=RPE_H + 1,
     )
 
     reset_fn, step_fn, get_obs_fn = TreadmillEnvironment()
@@ -268,45 +269,31 @@ def compute_a2c_loss(
     H = min(RPE_H, N - 1)                  # lag horizon (capped: no target can be > N-1 steps ahead)
     A = 2                                  # action size
 
-    # --- conditional k-window reward-predictor critic --------------------------------------------
-    # Model:  r_hat(s | a, j) ~= E[ r_s | action a taken j steps before s, o_{s-K+1..s} ].
-    # Input = [ flattened K-window of obs ending at s ,  a one-hot ,  normalized lag j ].
-    # Fit on every (anchor a, lag j) pair whose target s = a + j lands in-chunk with full context.
-    # Advantage for the action taken at t:  A_t = sum_{j=0}^{H} r_hat(t+j | a_t, j).
+    # --- reward predictor: linear readout of the actor hidden state -----------------------------
+    # r_hat is (B, N, H+1): from the actor hidden state h_t, a single linear map predicts the reward
+    # at lags 0..H (i.e. r_hat[:, t, j] ~= r_{t+j}).  Advantage for the action at t uses these.
     obs_feat = trajectory.observations[:, :, :obs_size]                 # (B, N, obs_size)  o_t (used for credit)
-    # reward-predictor features: observations + reward history (prev_reward r_{t-1}); NOT the target
-    # reward r_s -- prev_reward is lagged one step, so a window ending at s only contains r_{<s}.
+    # credit features: observations + reward history (prev_reward r_{t-1})
     feat = jnp.concatenate((
         obs_feat,                                                      # (B, N, obs_size)
         trajectory.observations[:, :, obs_size + A:],                  # (B, N, 1)  prev_reward
     ), axis=-1)                                                        # (B, N, obs_size + 1)
     feat_dim = obs_size + 1
-    win_idx = jnp.clip(jnp.arange(N)[:, None] + jnp.arange(K)[None, :] - (K - 1), 0, N - 1)
-    windows = feat[:, win_idx, :].reshape(B, N, K * feat_dim)          # (B, N, K*feat)  window ending at each s
-    act_oh = jax.nn.one_hot(lax.stop_gradient(trajectory.actions), A)    # (B, N, A)      action at each anchor
+    act_oh = jax.nn.one_hot(lax.stop_gradient(trajectory.actions), A)    # (B, N, A)  action at each anchor
 
-    # (anchor a, lag j) grid; target/window time s = a + j
-    a_idx = jnp.arange(N)[:, None]                                       # (N, 1)
+    # (anchor t, lag j) grid -> target reward at s = t + j (clipped at the chunk end)
     j_idx = jnp.arange(H + 1)[None, :]                                   # (1, H+1)
-    s_idx = a_idx + j_idx                                                # (N, H+1)
-    s_clip = jnp.clip(s_idx, 0, N - 1)
-    valid = (s_idx < N) & (s_clip >= (K - 1))                           # (N, H+1) target in-chunk w/ full obs context
-    mask = jnp.broadcast_to(valid[None, :, :], (B, N, H + 1)).astype(jnp.float32)
+    s_clip = jnp.clip(jnp.arange(N)[:, None] + j_idx, 0, N - 1)          # (N, H+1)
 
-    win_s = windows[:, s_clip, :]                                       # (B, N, H+1, K*obs)  obs window at s
-    act_a = jnp.broadcast_to(act_oh[:, :, None, :], (B, N, H + 1, A))   # anchor action a (broadcast over lag)
-    lag_f = jnp.broadcast_to(
-        (j_idx.astype(jnp.float32) / max(H, 1))[None, :, :, None], (B, N, H + 1, 1)
-    )                                                                   # normalized lag in [0, 1]
-    rp_in = jnp.concatenate([win_s, act_a, lag_f], axis=-1)            # (B, N, H+1, K*obs + A + 1)
-
+    # Linear readout from the actor hidden state (stop-grad: the readout learns, the actor doesn't).
     reward_net = A2CRNNFlax(action_size=2, hidden_size=hidden_size, unit_noise_std=unit_noise_std,
                             rnn_type=rnn_type, obs_size=obs_size,
-                            reward_pred_hidden_size=REWARD_PRED_HIDDEN)
-    r_hat = reward_net.apply(params, rp_in, method=A2CRNNFlax.predict_reward)   # (B, N, H+1)
+                            reward_pred_hidden_size=REWARD_PRED_HIDDEN, reward_pred_horizon=RPE_H + 1)
+    r_hat = reward_net.apply(params, lax.stop_gradient(trajectory.actor_hidden),
+                             method=A2CRNNFlax.predict_reward)[:, :, :H + 1]   # (B, N, H+1)
 
-    # Critic fit: predicted vs actual reward at the target time s, over all valid (a, j) pairs.
-    r_s = lax.stop_gradient(rewards)[:, s_clip]                         # (B, N, H+1)  actual reward at s
+    # Critic fit: predicted vs actual reward at the target time s = t + j.
+    r_s = lax.stop_gradient(rewards)[:, s_clip]                         # (B, N, H+1)  actual reward at t+j
     critic_loss = jnp.mean((r_hat - r_s) ** 2)
 
     # jax.debug.print('{x}', x=critic_loss)
@@ -361,12 +348,11 @@ def compute_a2c_loss(
         r_reward, DELAY_DECAY, 0.0)                                    # (B, N)  reverse-discounted return
     advantages = (credit_for_action * 100 + 1) * discounted_future_reward
 
+
     # jax.debug.print('{x}', x = (credit_for_action * 0).max())
 
     # advantages = (advantages - advantages.mean(axis=0)) / (advantages.std(axis=0) + 1e-6)  # per-t standardize (baseline)
-    advantages = advantages / (advantages.std(axis=0) + 1e-6)  # per-t standardize (baseline)
-
-
+    # advantages = advantages / (advantages.std(axis=0) + 1e-6)  # per-t standardize (baseline)
     log_probs = jax.nn.log_softmax(logits)
     chosen_log_probs = jnp.take_along_axis(
         log_probs,
@@ -765,6 +751,7 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
         init_scale=config.init_scale,
         reward_pred_hidden_size=REWARD_PRED_HIDDEN,
         window_dim=RPE_K * (config.obs_size + 1) + config.action_size + 1,
+        reward_pred_horizon=RPE_H + 1,
     )
 
     # Create training state
@@ -1004,6 +991,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
         init_scale=config.init_scale,
         reward_pred_hidden_size=REWARD_PRED_HIDDEN,
         window_dim=RPE_K * (config.obs_size + 1) + config.action_size + 1,
+        reward_pred_horizon=RPE_H + 1,
     )
 
     # Create training state (just for structure, won't be updated)

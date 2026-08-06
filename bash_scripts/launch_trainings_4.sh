@@ -1,5 +1,5 @@
 #!/bin/bash
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 
 # python3 code/scripts/train_treadmill_agent_jax.py \
 #     --config training_configs/fixed_exp_gru_initial_prob_offset_v4.json \
@@ -28,3 +28,7 @@ export CUDA_VISIBLE_DEVICES=1
 python3 code/scripts/train_treadmill_agent_jax_reward_gated_logits.py \
     --config training_configs/persistence_gated_exp_gru_initial_prob_offset_v5.json \
     --n_networks 1
+
+# python3 code/scripts/train_treadmill_agent_jax_reward_gated_logits.py \
+#     --config training_configs/persistence_gated_exp_gru_markov.json \
+#     --n_networks 1

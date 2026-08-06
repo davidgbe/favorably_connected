@@ -26,7 +26,9 @@ class TrainState:
     action_elig: Any = None            # per-action low-pass of the triggering observation
     action_credit_reward: Any = None   # low-passed (obs eligibility * reward) -> reward-stream credit matrix
     action_credit_pred: Any = None     # low-passed (obs eligibility * reward prediction) -> prediction-stream credit matrix
-    reward_pred_lr_scale: float = 1.0  # reward-predictor LR multiplier; <1 -> reward-pred net learns slower
+    # reward-predictor LR multiplier; <1 -> reward-pred net learns slower. Static (pytree_node=False)
+    # so make_optimizer can branch on it inside jit (it selects plain-Adam vs multi_transform).
+    reward_pred_lr_scale: float = struct.field(pytree_node=False, default=1.0)
 
 
 def _reward_pred_label_tree(params):
@@ -39,15 +41,23 @@ def _reward_pred_label_tree(params):
 
 
 def make_optimizer(params: Any, learning_rate: float, reward_pred_lr_scale: float = 1.0):
-    """Adam with a separate (typically smaller) learning rate for the reward-predictor params,
-    wrapped in the shared global-norm clip + apply_if_finite guard."""
-    tx = optax.multi_transform(
-        {
-            'other': optax.adam(learning_rate),
-            'reward_pred': optax.adam(learning_rate * reward_pred_lr_scale),
-        },
-        _reward_pred_label_tree(params),
-    )
+    """Adam wrapped in the shared global-norm clip + apply_if_finite guard.
+
+    When reward_pred_lr_scale == 1.0 (the default) this is a single plain Adam chain -- structurally
+    identical to what train_steps that build the optimizer inline produce, so their opt_state stays
+    compatible. Only when a non-unit scale is requested do we split into a multi_transform that gives
+    the reward-predictor params a separately-scaled learning rate. (reward_pred_lr_scale must be a
+    static Python value, since this branch is taken inside jit in some train_steps.)"""
+    if reward_pred_lr_scale == 1.0:
+        tx = optax.adam(learning_rate)
+    else:
+        tx = optax.multi_transform(
+            {
+                'other': optax.adam(learning_rate),
+                'reward_pred': optax.adam(learning_rate * reward_pred_lr_scale),
+            },
+            _reward_pred_label_tree(params),
+        )
     return optax.chain(
         optax.clip_by_global_norm(0.5),   # try values 0.3 – 1.0 depending on stability
         optax.apply_if_finite(tx, max_consecutive_errors=100),
