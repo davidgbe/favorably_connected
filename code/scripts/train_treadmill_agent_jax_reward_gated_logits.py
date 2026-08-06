@@ -91,6 +91,7 @@ CREDIT_ELIG_DECAY = 0.8    # eligibility-trace retention per step (higher -> lon
 CREDIT_DECAY_REWARD = 0.95  # reward-stream credit retention (slower decay)
 CREDIT_DECAY_PRED = 0.95    # prediction-stream credit retention (faster decay)
 GLOBAL_REWARD_DECAY = 0.995  # Weight for the global reward signal
+DELAY_DECAY = 0.8           # per-step discount on future rewards in the advantage (weight = DELAY_DECAY^delay)
 # Opportunity cost: the running average reward rate (trajectory.exp_filtered_reward_rate) is
 # subtracted from the reward signal in the credit stream, so an action's credit goes negative once
 # the local reward it earns drops below the environment's average rate (MVT leaving pressure).
@@ -354,8 +355,13 @@ def compute_a2c_loss(
     # Advantage: horizon sum of predicted rewards + stimulus/action credit (grad stopped).
     # jax.debug.print('credit {x} {y} {w} {z}', x=credit_for_action.mean(), y=credit_for_action.std(), w=credit_for_action.min(), z=credit_for_action.max())
     # jax.debug.print('reward {x} {y} {w} {z}', x=jnp.sum(r_hat, axis=-1).mean(), y=jnp.sum(r_hat, axis=-1).std(), w=jnp.sum(r_hat, axis=-1).min(), z=jnp.sum(r_hat, axis=-1).max())
-    reward_pred_sum = jnp.sum(r_hat, axis=-1)                         # (B, N)  horizon sum of predicted rewards
-    advantages = reward_pred_sum + 100 * credit_for_action # reducing this from 100 to 10 was pretty critical to getting this to work
+    # reward_pred_sum = jnp.sum(r_hat, axis=-1)                         # (B, N)  horizon sum of predicted rewards (metrics only)
+    # exp-discounted future reward within the block:  G_t = sum_{s>=t} DELAY_DECAY^(s-t) * r_s
+    discounted_future_reward = jax.vmap(compute_n_step_returns, (0, None, None))(
+        r_reward, DELAY_DECAY, 0.0)                                    # (B, N)  reverse-discounted return
+    advantages = (credit_for_action * 100 + 1) * discounted_future_reward
+
+    # jax.debug.print('{x}', x = discounted_future_reward.mean())
 
     advantages = (advantages - advantages.mean(axis=0)) / (advantages.std(axis=0) + 1e-6)  # per-t standardize (baseline)
     # advantages = advantages / (advantages.std(axis=0) + 1e-6)  # per-t standardize (baseline)
@@ -397,7 +403,7 @@ def compute_a2c_loss(
         'mean_reward': jnp.mean(trajectory.rewards),
         # per-step actor-weighting signals (B, N), already computed above
         'credit_for_action': credit_for_action,
-        'reward_pred_sum': reward_pred_sum,
+        # 'reward_pred_sum': reward_pred_sum,
     }
 
     return total_loss, (metrics, jax.lax.stop_gradient(final_train_state), jax.lax.stop_gradient(final_env_states))

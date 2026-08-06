@@ -1,7 +1,7 @@
 {
-  "exp_name": "persistence_gated_exp_gru_initial_prob_offset_r_in_pred_v5",
+  "exp_name": "persistence_gated_exp_gru_initial_prob_offset_mult_by_final_r_v2",
   "num_envs": 256,
-  "n_save_envs": 1,
+  "n_save_envs": 15,
   "patch_types_per_env": 3,
   "input_noise_std": 0.01,
   "hidden_size": 64,  
@@ -32,7 +32,7 @@
   "learning_rate": 1e-3,
   "reward_pred_lr_scale": 1.0,
   "n_sessions": 1001,
-  "output_save_start": 1,
+  "output_save_start": 100,
   "output_save_end": 1001,
   "output_save_step": 100
 }
