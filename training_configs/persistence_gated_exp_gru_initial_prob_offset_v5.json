@@ -1,5 +1,5 @@
 {
-  "exp_name": "persistence_gated_exp_gru_initial_prob_offset_pred_r_full_v5_sub_r_pred",
+  "exp_name": "persistence_gated_exp_gru_initial_prob_offset_pred_r_full_decay_0p99",
   "num_envs": 256,
   "n_save_envs": 15,
   "patch_types_per_env": 3,
@@ -31,8 +31,8 @@
   "global_reward_weight": 0,
   "learning_rate": 1e-4,
   "reward_pred_lr_scale": 1.0,
-  "n_sessions": 1001,
-  "output_save_start": 100,
-  "output_save_end": 501,
-  "output_save_step": 100
+  "n_sessions": 1002,
+  "output_save_start": 500,
+  "output_save_end": 1001,
+  "output_save_step": 500
 }

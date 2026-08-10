@@ -88,8 +88,8 @@ REWARD_PRED_HIDDEN = 64
 # The credit is (reward stream - prediction stream); the reward stream decays more slowly.
 # At each step the actor is weighted by  current_obs . credit[:, a_taken]  (see compute_a2c_loss).
 CREDIT_ELIG_DECAY = 0.8    # eligibility-trace retention per step (higher -> longer obs memory)
-CREDIT_DECAY_REWARD = 0.975  # reward-stream credit retention (slower decay)
-CREDIT_DECAY_PRED = 0.975    # prediction-stream credit retention (faster decay)
+CREDIT_DECAY_REWARD = 0.99  # reward-stream credit retention (slower decay)
+CREDIT_DECAY_PRED = 0.99   # prediction-stream credit retention (faster decay)
 GLOBAL_REWARD_DECAY = 0.995  # Weight for the global reward signal
 DELAY_DECAY = 0.8           # per-step discount on future rewards in the advantage (weight = DELAY_DECAY^delay)
 # Opportunity cost: the running average reward rate (trajectory.exp_filtered_reward_rate) is
