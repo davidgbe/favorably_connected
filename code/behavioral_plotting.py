@@ -1402,3 +1402,162 @@ def plot_leave_prob_by_failures(dfs, patch_types=(1, 2), n_failures=(0, 1, 2),
     ax.legend(frameon=False, fontsize=12)
     format_plot(ax, ticklabelsize=14)
     return ax, results
+
+
+# ── patch trajectory grid ────────────────────────────────────────────────────
+
+def patch_cat_matrix(df, patch_type, n_patches):
+    """(n_patches, n_sites) int matrix of per-site outcome categories for the
+    first *n_patches* patches of *patch_type* in *df*.
+
+    Category values:
+      -1  no site (padding)
+       0  opt out (agent did not stop)
+       1  unrewarded stop
+       2  rewarded stop
+    """
+    import matplotlib.colors as mcolors
+
+    d = df[df['patch_type'] == patch_type].copy()
+    if d.empty:
+        return np.full((n_patches, 1), -1, dtype=int)
+
+    d['site_index'] = d.groupby(['session_number', 'patch_number']).cumcount()
+    rs_next = d.groupby(['session_number', 'patch_number'])['rewards_seen_in_patch'].shift(-1)
+    d['site_rewarded'] = (rs_next - d['rewards_seen_in_patch']) > 0
+    d['patch_id'] = d.groupby(['session_number', 'patch_number']).ngroup()
+
+    ids = list(dict.fromkeys(d['patch_id']))[:n_patches]
+    sel = d[d['patch_id'].isin(ids)].copy()
+    sel['row'] = sel['patch_id'].map({p: i for i, p in enumerate(ids)})
+
+    stopped = sel['stopped'].values == 1
+    cat = np.where(stopped, np.where(sel['site_rewarded'].values, 2, 1), 0)
+
+    n_actual = len(ids)
+    n_sites = int(sel['site_index'].max()) + 1
+    M = np.full((n_actual, n_sites), -1, dtype=int)
+    M[sel['row'].values, sel['site_index'].values.astype(int)] = cat
+    return M
+
+
+def plot_patch_traj(df, patch_type, n_patches=40, col_width=4, gap=1,
+                   figsize=None, label_fontsize=9, tick_fontsize=8,
+                   ylim=None, scatter_optout=False):
+    """Plot a patch-trajectory grid for one df and one patch type.
+
+    One subplot per session. When scatter_optout=False (default) each subplot
+    shows the full colour-coded site grid. When scatter_optout=True each
+    subplot shows a scatter of the site index at which the agent opts out,
+    coloured with the patch-type rewarded-stop colour.
+
+    Returns
+    -------
+    fig, axes  (axes is a 1-D array of length n_sessions)
+    """
+    import matplotlib.colors as mcolors
+    import matplotlib.patches as mpatches
+
+    patch_color = odor_colors[patch_type]
+    cat_colors = {
+        2: patch_color,
+        1: '#dddddd',
+        0: '#ac37fa',
+    }
+
+    sessions = sorted(df['session_number'].unique())
+    n_sessions = len(sessions)
+
+    def to_img(M):
+        n_rows, n_sites = M.shape
+        W = n_rows * col_width + (n_rows - 1) * gap
+        img = np.ones((n_sites, W, 3))
+        for p in range(n_rows):
+            x = p * (col_width + gap)
+            col_pix = np.ones((n_sites, 3))
+            for cat, col in cat_colors.items():
+                col_pix[M[p] == cat] = mcolors.to_rgb(col)
+            img[:, x:x + col_width, :] = col_pix[:, None, :]
+        return img
+
+    def optout_sites(M):
+        """For each patch row return the site index of the first opt-out (0), or NaN."""
+        result = np.full(M.shape[0], np.nan)
+        for i, row in enumerate(M):
+            hits = np.where(row == 0)[0]
+            if len(hits):
+                result[i] = hits[0]
+        return result
+
+    # Pre-compute matrices to size the figure
+    matrices = [patch_cat_matrix(df[df['session_number'] == s], patch_type, n_patches)
+                for s in sessions]
+
+    if figsize is None:
+        figsize = (6, 2)
+
+    fig, axes = plt.subplots(1, n_sessions, figsize=figsize,
+                             squeeze=False, sharey=True, sharex=True)
+    axes = axes[0]
+
+    axes[0].set_xlabel('Patch #', fontsize=label_fontsize)
+    axes[0].set_ylabel('Site index', fontsize=label_fontsize)
+
+    for ax, s, M in zip(axes, sessions, matrices):
+        n_rows, n_sites = M.shape
+
+        if scatter_optout:
+            ys = optout_sites(M)
+            xs = np.arange(n_rows)
+            ax.scatter(xs[~np.isnan(ys)], ys[~np.isnan(ys)],
+                       color=patch_color, s=8, linewidths=0)
+            ax.set_xlim(-0.5, n_rows - 0.5)
+
+            if ylim is not None:
+                ax.set_ylim(ylim[0], ylim[1])
+                sidx = np.arange(ylim[0], ylim[1] + 1,
+                                 max(1, int(np.ceil((ylim[1] - ylim[0]) / 6))))
+            else:
+                ax.set_ylim(-0.5, n_sites - 0.5)
+                sidx = np.arange(0, n_sites, max(1, int(np.ceil(n_sites / 6))))
+
+            ax.set_xticks(np.arange(0, n_rows, max(1, int(np.ceil(n_rows / 8)))))
+            ax.set_xticklabels(
+                [str(p) for p in np.arange(0, n_rows, max(1, int(np.ceil(n_rows / 8))))],
+                fontsize=tick_fontsize)
+            ax.set_yticks(sidx)
+            ax.set_yticklabels([str(s_) for s_ in sidx], fontsize=tick_fontsize)
+
+        else:
+            ax.imshow(to_img(M), aspect='auto', interpolation='nearest')
+            ax.invert_yaxis()
+
+            pidx = np.arange(0, n_rows, max(1, int(np.ceil(n_rows / 8))))
+            ax.set_xticks(pidx * (col_width + gap) + (col_width - 1) / 2)
+            ax.set_xticklabels([str(p) for p in pidx], fontsize=tick_fontsize)
+
+            if ylim is not None:
+                sidx = np.arange(ylim[0], ylim[1],
+                                 max(1, int(np.ceil((ylim[1] - ylim[0]) / 6))))
+            else:
+                sidx = np.arange(0, n_sites, max(1, int(np.ceil(n_sites / 6))))
+            ax.set_yticks(sidx)
+            ax.set_yticklabels([str(s_) for s_ in sidx], fontsize=tick_fontsize)
+
+            if ylim is not None:
+                ax.set_ylim(ylim[1] - 0.5, ylim[0] - 0.5)
+
+        ax.set_title(f'Session {s}', fontsize=label_fontsize)
+        format_plot(ax)
+
+    if not scatter_optout:
+        handles = [
+            mpatches.Patch(color=cat_colors[2], label='rewarded stop'),
+            mpatches.Patch(color=cat_colors[1], label='unrewarded stop'),
+            mpatches.Patch(color=cat_colors[0], label='opt out'),
+        ]
+        axes[-1].legend(handles=handles, fontsize=tick_fontsize, frameon=False,
+                        loc='upper right', bbox_to_anchor=(1.0, -0.12), ncol=3)
+
+    fig.suptitle(f'Patch type {patch_type}', fontsize=label_fontsize + 1, y=1.02)
+    return fig, axes

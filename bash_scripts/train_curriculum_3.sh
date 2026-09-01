@@ -1,5 +1,5 @@
 #!/bin/bash
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 
 # python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
 #   --config training_configs/two_stage_exp_gru_initial_prob_offset.json
@@ -31,5 +31,29 @@ export CUDA_VISIBLE_DEVICES=0
 # python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
 #     --config training_configs/gru_exp_fixed_discounting.json
 
-python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
-  --config training_configs/exp_fixed_offset_decay_resampled.json
+# python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
+#   --config training_configs/exp_fixed_offset_decay_resampled.json
+
+# python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
+#   --config training_configs/fixed_exp_gru_initial_prob_offset_interpatch_lengthen.json
+
+# python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
+#   --config training_configs/fixed_exp_gru_initial_prob_offset_interpatch_shorten.json
+
+# python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
+#   --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen.json
+
+# python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
+#   --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen.json
+
+# python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
+#   --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen_epoch_1000.json
+
+python3 code/scripts/train_treadmill_agent_jax_curriculum_train_traj.py \
+  --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen_epoch_0250.json
+
+python3 code/scripts/train_treadmill_agent_jax_curriculum_train_traj.py \
+  --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen.json
+
+python3 code/scripts/train_treadmill_agent_jax_curriculum_train_traj.py \
+  --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen_epoch_0250_frozen.json

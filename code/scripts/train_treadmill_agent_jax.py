@@ -175,7 +175,7 @@ def compute_a2c_loss(
         'mean_reward': jnp.mean(trajectory.rewards),
     }
 
-    return total_loss, (metrics, jax.lax.stop_gradient(final_train_state), jax.lax.stop_gradient(final_env_states))
+    return total_loss, (metrics, jax.lax.stop_gradient(final_train_state), jax.lax.stop_gradient(final_env_states), jax.lax.stop_gradient(trajectory))
 
 
 def compute_n_step_returns(rewards, gamma, v_t):
@@ -262,7 +262,7 @@ def train_step(
     """Single training step"""
     
     grad_fn = jax.grad(compute_a2c_loss, has_aux=True)
-    grads, (metrics, final_train_state, final_env_states) = grad_fn(
+    grads, (metrics, final_train_state, final_env_states, _trajectory) = grad_fn(
         train_state.params,
         train_state,
         env_states,
@@ -304,7 +304,7 @@ def train_step(
         opt_state=new_opt_state,
     )
     
-    return final_train_state, final_env_states, metrics
+    return final_train_state, final_env_states, metrics, _trajectory
 
 # Configuration matching your original hyperparameters
 @struct.dataclass
@@ -426,7 +426,7 @@ def run_session_updates_with_metrics(
     def update_step(carry, _):
         train_state, env_states = carry
 
-        new_train_state, new_env_states, metrics = train_step(
+        new_train_state, new_env_states, metrics, _traj = train_step(
             train_state=train_state,
             env_states=env_states,
             env_params=env_params,
@@ -461,6 +461,79 @@ def run_session_updates_with_metrics(
     # jax.debug.print('activity_norm: {x}', x=all_metrics['activity_loss'])
 
     return final_train_state, final_env_states, all_metrics
+
+
+@partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'unit_noise_std', 'rnn_type', 'obs_size', 'n_updates_per_session', 'n_steps_per_update', 'normalize_advantages', 'n_save_envs'])
+def run_session_updates_with_metrics_and_traj(
+    train_state: TrainState,
+    env_states: TreadmillEnvState,
+    env_params: TreadmillEnvParams,
+    gamma: float,
+    critic_weight: float,
+    entropy_weight: float,
+    env_prediction_weight: float,
+    global_reward_weight: float,
+    activity_norm_weight: float,
+    pred_obs_weight: float,
+    input_noise_std: float,
+    action_size: int,
+    hidden_size: int,
+    unit_noise_std: float,
+    rnn_type: str,
+    obs_size: int,
+    n_updates_per_session: int,
+    n_steps_per_update: int,
+    normalize_advantages: bool,
+    n_save_envs: int,
+) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray], Any]:
+    """Like run_session_updates_with_metrics but also returns the training trajectories.
+
+    Returns training_trajectory with field shapes (n_save_envs, n_updates*n_steps, ...) —
+    the actual trajectories used during weight updates, not a separate post-hoc rollout.
+    """
+
+    def update_step(carry, _):
+        train_state, env_states = carry
+
+        new_train_state, new_env_states, metrics, trajectory = train_step(
+            train_state=train_state,
+            env_states=env_states,
+            env_params=env_params,
+            gamma=gamma,
+            critic_weight=critic_weight,
+            entropy_weight=entropy_weight,
+            env_prediction_weight=env_prediction_weight,
+            global_reward_weight=global_reward_weight,
+            activity_norm_weight=activity_norm_weight,
+            pred_obs_weight=pred_obs_weight,
+            input_noise_std=input_noise_std,
+            action_size=action_size,
+            hidden_size=hidden_size,
+            unit_noise_std=unit_noise_std,
+            rnn_type=rnn_type,
+            obs_size=obs_size,
+            n_steps_per_update=n_steps_per_update,
+            normalize_advantages=normalize_advantages,
+        )
+
+        traj_save = jax.tree.map(lambda x: x[:n_save_envs], trajectory)
+        return (new_train_state, new_env_states), (metrics, traj_save)
+
+    (final_train_state, final_env_states), (all_metrics, all_trajectories) = lax.scan(
+        update_step,
+        (train_state, env_states),
+        None,
+        length=n_updates_per_session,
+    )
+
+    # Reshape (n_updates, n_save_envs, n_steps, ...) -> (n_save_envs, n_updates*n_steps, ...)
+    def _merge(x):
+        x = jnp.swapaxes(x, 0, 1)  # (n_save_envs, n_updates, n_steps, ...)
+        return x.reshape(n_save_envs, n_updates_per_session * n_steps_per_update, *x.shape[3:])
+
+    training_trajectory = jax.tree.map(_merge, all_trajectories)
+
+    return final_train_state, final_env_states, all_metrics, training_trajectory
 
 
 def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):

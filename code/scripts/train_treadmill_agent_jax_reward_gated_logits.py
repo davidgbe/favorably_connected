@@ -1,3 +1,4 @@
+from dis import dis
 import sys
 import os
 from pathlib import Path
@@ -88,10 +89,14 @@ REWARD_PRED_HIDDEN = 64
 # The credit is (reward stream - prediction stream); the reward stream decays more slowly.
 # At each step the actor is weighted by  current_obs . credit[:, a_taken]  (see compute_a2c_loss).
 CREDIT_ELIG_DECAY = 0.8    # eligibility-trace retention per step (higher -> longer obs memory)
-CREDIT_DECAY_REWARD = 0.99  # reward-stream credit retention (slower decay)
-CREDIT_DECAY_PRED = 0.99   # prediction-stream credit retention (faster decay)
-GLOBAL_REWARD_DECAY = 0.995  # Weight for the global reward signal
-DELAY_DECAY = 0.8           # per-step discount on future rewards in the advantage (weight = DELAY_DECAY^delay)
+CREDIT_DECAY_REWARD = 0.975  # reward-stream credit retention (slower decay)
+CREDIT_DECAY_PRED = 0.975   # prediction-stream credit retention (faster decay)
+# The credit feature at each anchor is the flattened stack of the last N_OBS_TIMESTEPS (obs+reward)
+# vectors, so the per-action credit vector represents a short window of recent timesteps, not just
+# the current one. This widens the eligibility/credit matrices to (N_OBS_TIMESTEPS*feat_dim, A).
+N_OBS_TIMESTEPS = 1
+GLOBAL_REWARD_DECAY = 0.99  # Weight for the global reward signal
+DELAY_DECAY = 0.9           # per-step discount on future rewards in the advantage (weight = DELAY_DECAY^delay)
 # Opportunity cost: the running average reward rate (trajectory.exp_filtered_reward_rate) is
 # subtracted from the reward signal in the credit stream, so an action's credit goes negative once
 # the local reward it earns drops below the environment's average rate (MVT leaving pressure).
@@ -148,7 +153,7 @@ def collect_trajectory(
         # jax.debug.print('{x}', x=network_input[0, :])
 
         # Forward pass through network
-        logits, values, new_actor_hidden, new_critic_hidden, pred_env_quality, pred_obs, pred_reward_rate = network.apply(
+        logits, values, new_actor_hidden, new_critic_hidden, pred_env_quality, pred_obs, pred_reward_rate, _reward_pred, _belief = network.apply(
             train_state.params,
             jax.lax.stop_gradient(network_input),
             train_state.actor_hidden,
@@ -270,8 +275,8 @@ def compute_a2c_loss(
     A = 2                                  # action size
 
     # --- reward predictor: linear readout of the actor hidden state -----------------------------
-    # r_hat is (B, N, H+1): from the actor hidden state h_t, a single linear map predicts the reward
-    # at lags 0..H (i.e. r_hat[:, t, j] ~= r_{t+j}).  Advantage for the action at t uses these.
+    # r_hat is (B, N): from the actor hidden state h_t, a linear map predicts the NEXT-step reward
+    # r_{t+1}.  The credit signal below uses this single prediction as r_pred.
     obs_feat = trajectory.observations[:, :, :obs_size]                 # (B, N, obs_size)  o_t (used for credit)
     # credit features: observations + reward history (prev_reward r_{t-1})
     feat = jnp.concatenate((
@@ -279,22 +284,31 @@ def compute_a2c_loss(
         trajectory.observations[:, :, obs_size + A:],                  # (B, N, 1)  prev_reward
     ), axis=-1)                                                        # (B, N, obs_size + 1)
     feat_dim = obs_size + 1
-    act_oh = jax.nn.one_hot(lax.stop_gradient(trajectory.actions), A)    # (B, N, A)  action at each anchor
 
-    # (anchor t, lag j) grid -> target reward at s = t + j (clipped at the chunk end)
-    j_idx = jnp.arange(H + 1)[None, :]                                   # (1, H+1)
-    s_clip = jnp.clip(jnp.arange(N)[:, None] + j_idx, 0, N - 1)          # (N, H+1)
+    # Widen the credit feature to span the last N_OBS_TIMESTEPS timesteps: at each anchor t, flatten
+    # the (obs+reward) vectors feat[:, t-N_OBS_TIMESTEPS+1 .. t] (zero-padded at the chunk start).
+    # So the per-action credit vector represents a window of recent obs, not just the current step.
+    def _stack_window(x, w):
+        Bx, Nx, Dx = x.shape
+        cols = [x if k == 0 else
+                jnp.concatenate([jnp.zeros((Bx, k, Dx), x.dtype), x[:, :Nx - k, :]], axis=1)
+                for k in range(w)]                                     # cols[k] = x shifted back k steps
+        return jnp.concatenate(cols[::-1], axis=-1)                    # (B, N, w*D)  oldest .. newest
+    feat = _stack_window(feat, N_OBS_TIMESTEPS)                        # (B, N, window_dim)
+    window_dim = N_OBS_TIMESTEPS * feat_dim                            # flattened window feature size
+
+    act_oh = jax.nn.one_hot(lax.stop_gradient(trajectory.actions), A)    # (B, N, A)  action at each anchor
 
     # Linear readout from the actor hidden state (stop-grad: the readout learns, the actor doesn't).
     reward_net = A2CRNNFlax(action_size=2, hidden_size=hidden_size, unit_noise_std=unit_noise_std,
                             rnn_type=rnn_type, obs_size=obs_size,
                             reward_pred_hidden_size=REWARD_PRED_HIDDEN, reward_pred_horizon=RPE_H + 1)
+    # r_hat (B, N): predict the NEXT-step reward r_{t+1} from the actor hidden state h_t.
     r_hat = reward_net.apply(params, lax.stop_gradient(trajectory.actor_hidden),
-                             method=A2CRNNFlax.predict_reward)[:, :, :H + 1]   # (B, N, H+1)
+                             method=A2CRNNFlax.predict_reward)[:, :, 0]        # (B, N)
 
-    # Critic fit: predicted vs actual reward at the target time s = t + j.
-    r_s = lax.stop_gradient(rewards)[:, s_clip]                         # (B, N, H+1)  actual reward at t+j
-    critic_loss = jnp.mean((r_hat - r_s) ** 2)
+    # Critic fit: predicted vs actual next-step reward r_{t+1} (clipped at the chunk end).
+    critic_loss = jnp.mean((r_hat - lax.stop_gradient(rewards)) ** 2)
 
     # jax.debug.print('{x}', x=critic_loss)
 
@@ -304,34 +318,37 @@ def compute_a2c_loss(
     #   reward stream     = low-pass_{CREDIT_DECAY_REWARD}(eligibility * reward)      (slower decay)
     #   prediction stream = low-pass_{CREDIT_DECAY_PRED}(eligibility * r_pred)        (faster decay)
     # credit matrix = reward stream - prediction stream;  credit_t = current_obs . credit[:, a_taken].
-    # r_pred = lag-0 column of the reward net = p(r_t | action_t, k-step obs history).
+    # r_pred = the reward net's next-step reward prediction r_{t+1}.
     r_reward = lax.stop_gradient(rewards)                              # (B, N)  actual reward
-    r_pred = lax.stop_gradient(r_hat[:, :, 0])                          # (B, N)  p(r_t | a_t, history)
+    r_pred = lax.stop_gradient(r_hat)                                   # (B, N)  predicted next-step reward
     r_rate = lax.stop_gradient(trajectory.exp_filtered_reward_rate)     # (B, N)  running avg reward rate (opportunity cost)
 
-    # jax.debug.print('critic_loss {x}', x=critic_loss)
+    # jax.debug.print('{x}', x=r_hat[0, :])
+    # jax.debug.print('{x}', x=rewards[0, :])
 
 
     def credit_scan(carry, xt):
-        elig, credit_rew, credit_prd = carry                           # (B, feat, A) each  (feat = obs + reward)
-        obs_t, act_t, rew_t, prd_t, rate_t = xt                        # (B, feat), (B, A), (B,), (B,), (B,)
-        obs_by_action = obs_t[:, :, None] * act_t[:, None, :] / jnp.sqrt(feat_dim * A)         # (B, feat, A)
+        elig, credit_rew, credit_prd = carry                           # (B, window_dim, A) each
+        obs_t, act_t, r_t, prd_t, rate_t = xt                      # rnext_t = actual next-step reward r_{t+1}
+        obs_by_action = obs_t[:, :, None] * act_t[:, None, :] / jnp.sqrt(window_dim * A)       # (B, window_dim, A)
         elig = CREDIT_ELIG_DECAY * elig + (1.0 - CREDIT_ELIG_DECAY) * obs_by_action
-        # reward signal = actual reward - predicted reward - opportunity cost (avg reward rate)
-        signal = rew_t - jnp.maximum(prd_t, 0.0) # - rate_t             # (B,)
-        credit_rew = CREDIT_DECAY_REWARD * credit_rew + (1 - CREDIT_DECAY_REWARD) * elig * signal[:, None, None]
+        # like-for-like RPE: actual next-step reward - predicted next-step reward (both are r_{t+1})
+        signal = r_t - jnp.maximum(prd_t, 0.0) # - rate_t           # (B,)
+        # credit_rew = (1 - CREDIT_DECAY_REWARD) * elig * signal[:, None, None] + CREDIT_DECAY_REWARD * credit_rew
+        credit_rew = jnp.where((r_t > 0.0)[:, None, None], elig * signal[:, None, None], CREDIT_DECAY_REWARD * credit_rew + elig * signal[:, None, None])
         credit = credit_rew                            # (B, obs, A)  stream1 - stream2
         credit_taken = jnp.sum(credit * act_t[:, None, :], axis=-1)    # (B, obs)
         credit_t = jnp.sum(obs_t * credit_taken, axis=-1)             # (B,)
-        return (elig, credit_rew, credit_prd), credit_t
+        return (elig, credit_rew, credit_prd), (credit_t, credit_rew)
 
-    (final_elig, final_credit_rew, final_credit_prd), credit_tN = lax.scan(
+    (final_elig, final_credit_rew, final_credit_prd), (credit_tN, eligibility) = lax.scan(
         credit_scan,
         (train_state.action_elig, train_state.action_credit_reward, train_state.action_credit_pred),
         (jnp.swapaxes(feat, 0, 1), jnp.swapaxes(act_oh, 0, 1),
          jnp.swapaxes(r_reward, 0, 1), jnp.swapaxes(r_pred, 0, 1), jnp.swapaxes(r_rate, 0, 1)),
     )
     credit_for_action = jnp.swapaxes(credit_tN, 0, 1)                  # (B, N)
+    # jax.debug.print('signal: {x}', x=signalN[:, 0])
     # Advance the persistent filter state for the next block.
     final_train_state = final_train_state.replace(
         action_elig=final_elig,
@@ -340,18 +357,16 @@ def compute_a2c_loss(
     )
 
     # Advantage: horizon sum of predicted rewards + stimulus/action credit (grad stopped).
-    # jax.debug.print('credit {x} {y} {w} {z}', x=credit_for_action.mean(), y=credit_for_action.std(), w=credit_for_action.min(), z=credit_for_action.max())
-    # jax.debug.print('reward {x} {y} {w} {z}', x=jnp.sum(r_hat, axis=-1).mean(), y=jnp.sum(r_hat, axis=-1).std(), w=jnp.sum(r_hat, axis=-1).min(), z=jnp.sum(r_hat, axis=-1).max())
-    # reward_pred_sum = jnp.sum(r_hat, axis=-1)                         # (B, N)  horizon sum of predicted rewards (metrics only)
-    # exp-discounted future reward within the block:  G_t = sum_{s>=t} DELAY_DECAY^(s-t) * r_s
-    discounted_future_reward = jax.vmap(compute_n_step_returns, (0, None, None))(
-        r_reward, DELAY_DECAY, 0.0)                                    # (B, N)  reverse-discounted return
-    advantages = (credit_for_action * 100 + 1) * discounted_future_reward
+    # Nearest future reward: DELAY_DECAY^(k-t) * r_k where k >= t is the CLOSEST step with a reward.
+    discounted_future_reward = jax.vmap(nearest_future_reward, (0, None))(r_reward, DELAY_DECAY)
+    advantages = (credit_for_action + 1) * discounted_future_reward # * 1 + 1) * discounted_future_reward - r_rate
 
+    # jax.debug.print('{x}', x = (credit_for_action * jnp.where(discounted_future_reward > 0, 1, 0)).max())
+    # jax.debug.print('{x}', x = (credit_for_action).mean())
+    # jax.debug.print('{x}', x = (discounted_future_reward).mean())
+    # jax.debug.print('{x}', x = (r_rate).mean())
 
-    # jax.debug.print('{x}', x = (credit_for_action * 0).max())
-
-    # advantages = (advantages - advantages.mean(axis=0)) / (advantages.std(axis=0) + 1e-6)  # per-t standardize (baseline)
+    advantages = (advantages - advantages.mean(axis=0)) / (advantages.std(axis=0) + 1e-6)  # per-t standardize (baseline)
     # advantages = advantages / (advantages.std(axis=0) + 1e-6)  # per-t standardize (baseline)
     log_probs = jax.nn.log_softmax(logits)
     chosen_log_probs = jnp.take_along_axis(
@@ -419,6 +434,28 @@ def compute_n_step_returns(rewards, gamma, v_t, reverse=True):
         reverse=reverse,
     )
     return returns
+
+
+def nearest_future_reward(rewards, decay):
+    """For each t, decay^(k-t) * r_k where k >= t is the CLOSEST future step with a reward (r_k > 0).
+
+    Only the nearest reward is used (not the discounted sum of all future rewards). Reverse recurrence:
+        v_t = r_t                if r_t > 0   (the reward is at t: decay^0 * r_t)
+        v_t = decay * v_{t+1}    otherwise    (carry the nearest future reward one step closer)
+    with v beyond the block == 0.
+
+    Args:
+        rewards: (time_steps,) per-step rewards for one env.
+        decay:   per-step discount.
+    Returns:
+        (time_steps,) nearest-future-reward values.
+    """
+    def step(carry, r):
+        v = jnp.where(r > 0.0, r, decay * carry)
+        return v, v
+
+    _, out = lax.scan(step, 0.0, rewards, reverse=True)
+    return out
 
 
 def forward_value_targets(rewards, lam, anchor):
@@ -829,9 +866,9 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
             prev_action=jnp.zeros((config.num_envs,), dtype=jnp.int32),
             prev_reward=jnp.zeros((config.num_envs,)),
             prev_obs=obs,
-            action_elig=jnp.zeros((config.num_envs, config.obs_size + 1, config.action_size)),
-            action_credit_reward=jnp.zeros((config.num_envs, config.obs_size + 1, config.action_size)),
-            action_credit_pred=jnp.zeros((config.num_envs, config.obs_size + 1, config.action_size)),
+            action_elig=jnp.zeros((config.num_envs, N_OBS_TIMESTEPS * (config.obs_size + 1), config.action_size)),
+            action_credit_reward=jnp.zeros((config.num_envs, N_OBS_TIMESTEPS * (config.obs_size + 1), config.action_size)),
+            action_credit_pred=jnp.zeros((config.num_envs, N_OBS_TIMESTEPS * (config.obs_size + 1), config.action_size)),
         )
 
         train_state, env_states, all_metrics = run_session_updates_with_metrics(

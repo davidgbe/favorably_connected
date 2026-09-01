@@ -26,6 +26,7 @@ class TrainState:
     action_elig: Any = None            # per-action low-pass of the triggering observation
     action_credit_reward: Any = None   # low-passed (obs eligibility * reward) -> reward-stream credit matrix
     action_credit_pred: Any = None     # low-passed (obs eligibility * reward prediction) -> prediction-stream credit matrix
+    luck_filter: Any = None            # (NUM_ENVS,) persistent EMA of (reward - reward_prediction): "recent luck"
     # reward-predictor LR multiplier; <1 -> reward-pred net learns slower. Static (pytree_node=False)
     # so make_optimizer can branch on it inside jit (it selects plain-Adam vs multi_transform).
     reward_pred_lr_scale: float = struct.field(pytree_node=False, default=1.0)
@@ -96,6 +97,7 @@ def create_train_state(
     action_elig = jnp.zeros((num_envs, credit_feat_dim, 2))
     action_credit_reward = jnp.zeros((num_envs, credit_feat_dim, 2))
     action_credit_pred = jnp.zeros((num_envs, credit_feat_dim, 2))
+    luck_filter = jnp.zeros((num_envs,))
 
     return TrainState(
         params=params,
@@ -111,5 +113,6 @@ def create_train_state(
         action_elig=action_elig,
         action_credit_reward=action_credit_reward,
         action_credit_pred=action_credit_pred,
+        luck_filter=luck_filter,
         reward_pred_lr_scale=reward_pred_lr_scale,
     )

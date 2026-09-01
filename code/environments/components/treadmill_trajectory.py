@@ -47,6 +47,11 @@ class TrajectoryData:
     pred_reward_rate: jnp.ndarray
 
     credit_for_action: Optional[jnp.ndarray] = None  # (num_envs, n_steps) credit of the taken action
+    reward_pred: Optional[jnp.ndarray] = None  # (num_envs, n_steps, reward_pred_horizon) multi-lag reward forecast from the pre-step actor hidden
+    M: Optional[jnp.ndarray] = None  # (num_envs, n_steps) reward modulation 1 - sum(lag-0 forecast since last reward); reset at each reward
+    belief: Optional[jnp.ndarray] = None  # (num_envs, n_steps, belief_dim) critic belief vector b_t (context for S_C)
+    belief_pred: Optional[jnp.ndarray] = None  # (num_envs, n_steps, N_BELIEF_PREDICT*(obs+1)) belief [obs, reward] forecast
+    reward_pred_1step: Optional[jnp.ndarray] = None  # (num_envs, n_steps) dedicated 1-step reward forecast E[r_t]
 
 
 @partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'n_steps', 'obs_size', 'intervention_fn'])
@@ -98,7 +103,7 @@ def collect_trajectory(
         rng_key, network_noise_key = random.split(rng_key)
 
         # Forward pass through network
-        logits, values, new_actor_hidden, new_critic_hidden, pred_env_quality, pred_obs, pred_reward_rate = network.apply(
+        logits, values, new_actor_hidden, new_critic_hidden, pred_env_quality, pred_obs, pred_reward_rate, *_ = network.apply(
             train_state.params,
             jax.lax.stop_gradient(network_input),
             train_state.actor_hidden,

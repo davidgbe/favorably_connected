@@ -264,6 +264,17 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
 
                 rw_site_counter = 0
                 if len(hist_odor_site_data) > 0 and hist_odor_site_data[-1]['added'] == 0:
+                    if not brief:
+                        onset_t = hist_odor_site_data[-1].pop('_onset_t', None)
+                        if onset_t is not None:
+                            entry_hits = np.where(np.array(b_data['reward_site_idx'][onset_t:i]) >= 0)[0]
+                            if len(entry_hits):
+                                entry_t = onset_t + entry_hits[0]
+                                site_attempted = b_data['current_reward_site_attempted'][entry_t:i]
+                                hits = np.where(np.array(site_attempted))[0]
+                                hist_odor_site_data[-1]['reaction_time'] = max(0, int(hits[0]) - 3) if len(hits) else np.nan
+                            else:
+                                hist_odor_site_data[-1]['reaction_time'] = np.nan
                     hist_odor_site_data[-1]['added'] = 1
                     ss['all_odor_site_data'].append(hist_odor_site_data[-1])
                     hist_odor_site_data = []
@@ -295,6 +306,9 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
 
                 if all_patch_reward_prob_prefactors is not None:
                     odor_site_data['patch_reward_prob_prefactor'] = all_patch_reward_prob_prefactors[i]
+
+                if not brief:
+                    odor_site_data['_onset_t'] = i  # removed before appending
 
                 if rewards_seen_in_patch[i] < max_acc_reward:
                     ss['acc_reward_stop_opportunities_for_patch_type'][pt, int(rewards_seen_in_patch[i])] += 1
@@ -341,10 +355,27 @@ def get_session_summaries(all_behavior_data, max_reward_sites=40, max_acc_reward
                             0 if prev_site_rewarded else hist_odor_site_data[-1]['consecutive_misses'] + 1
                         )
 
+                        # Reaction time: timesteps from site entry (reward_site_idx >= 0)
+                        # to first stop action within the site.
+                        onset_t = hist_odor_site_data[-1].pop('_onset_t', None)
+                        if onset_t is not None:
+                            entry_hits = np.where(np.array(b_data['reward_site_idx'][onset_t:i]) >= 0)[0]
+                            if len(entry_hits):
+                                entry_t = onset_t + entry_hits[0]
+                                site_attempted = b_data['current_reward_site_attempted'][entry_t:i]
+                                hits = np.where(np.array(site_attempted))[0]
+                                hist_odor_site_data[-1]['reaction_time'] = max(0, int(hits[0]) - 3) if len(hits) else np.nan
+                            else:
+                                hist_odor_site_data[-1]['reaction_time'] = np.nan
+                        else:
+                            hist_odor_site_data[-1]['reaction_time'] = np.nan
+                        odor_site_data['reaction_time_prev'] = hist_odor_site_data[-1]['reaction_time']
+
                     ss['all_odor_site_data'].append(hist_odor_site_data[-1])
                     hist_odor_site_data[-1]['added'] = 1
                 elif not brief:
                     odor_site_data['consecutive_misses'] = 0
+                    odor_site_data['reaction_time_prev'] = np.nan
 
                 hist_odor_site_data.append(odor_site_data)
 
