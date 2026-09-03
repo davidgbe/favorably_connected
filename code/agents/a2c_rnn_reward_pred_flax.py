@@ -24,9 +24,6 @@ class A2CRNNFlax(nn.Module):
     rnn_type: str = 'GRU'
     unit_noise_std: float = 1e-2
     init_scale: float = 1.0
-    reward_pred_hidden_size: int = 12
-    reward_pred_init_scale: int = 0.001
-    reward_pred_horizon: int = 21   # number of lag outputs (RPE_H + 1); linear readout from hidden state
     belief_dim: int = 8             # dimensionality of the critic belief vector b_t (context for S_C)
     belief_pred_hidden: int = 64    # feedforward hidden size for the belief -> future [obs, reward] predictor
     belief_pred_horizon: int = 20   # N_BELIEF_PREDICT: number of future [obs, reward] tuples the belief predicts
@@ -105,7 +102,7 @@ class A2CRNNFlax(nn.Module):
         (reuses the obs_prediction MLP head)."""
         return self.obs_prediction(nn.relu(self.obs_pred_layer_1(hidden)))
 
-    def init_all(self, x, actor_hidden, critic_hidden, window):
+    def init_all(self, x, actor_hidden, critic_hidden):
         """Exercise every submodule so init creates all params (actor + reward readout).
         `window` is unused (kept for signature compatibility); the readout is on the hidden state."""
         self.__call__(x, actor_hidden, critic_hidden)   # exercises belief_readout + predict_belief
@@ -114,21 +111,17 @@ class A2CRNNFlax(nn.Module):
 
 
 def init_network_and_params(hidden_size, action_size, obs_size, rnn_type, unit_noise_std,
-                            rng_key, init_scale=1.0, reward_pred_hidden_size=64, window_dim=None,
-                            reward_pred_horizon=21, belief_dim=8, belief_pred_hidden=64, belief_pred_horizon=20):
+                            rng_key, init_scale=1.0, belief_dim=8, belief_pred_hidden=64,
+                            belief_pred_horizon=20):
     input_size = obs_size + action_size + 1
-    if window_dim is None:
-        window_dim = obs_size + action_size            # unused (readout is on the hidden state)
     network = A2CRNNFlax(action_size=action_size, obs_size=obs_size, hidden_size=hidden_size,
                          rnn_type=rnn_type, unit_noise_std=unit_noise_std, init_scale=init_scale,
-                         reward_pred_hidden_size=reward_pred_hidden_size,
-                         reward_pred_horizon=reward_pred_horizon, belief_dim=belief_dim,
-                         belief_pred_hidden=belief_pred_hidden, belief_pred_horizon=belief_pred_horizon)
+                         belief_dim=belief_dim, belief_pred_hidden=belief_pred_hidden,
+                         belief_pred_horizon=belief_pred_horizon)
     param_key, noise_key = random.split(rng_key, 2)
     dummy_input = jnp.zeros((1, input_size))
     dummy_hidden = jnp.zeros((1, hidden_size))
-    dummy_window = jnp.zeros((1, window_dim))
     params = network.init({'params': param_key, 'noise': noise_key},
-                          dummy_input, dummy_hidden, dummy_hidden, dummy_window,
+                          dummy_input, dummy_hidden, dummy_hidden,
                           method=A2CRNNFlax.init_all)
     return network, params

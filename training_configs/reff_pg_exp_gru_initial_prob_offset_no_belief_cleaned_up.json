@@ -1,5 +1,5 @@
 {
-  "exp_name": "reff_pg_exp_gru_initial_prob_offset_belief_32_dim_v3",
+  "exp_name": "reff_pg_exp_gru_initial_prob_offset_no_belief_clean_ms0p5",
   "num_envs": 256,
   "n_save_envs": 5,
   "patch_types_per_env": 3,
@@ -33,9 +33,9 @@
   "reward_pred_lr_scale": 1.0,
   "m_decay": 0.99,
   "m_scale": 0.5,
-  "use_belief": true,
-  "n_sessions": 3001,
-  "output_save_start": 200,
+  "use_belief": false,
+  "n_sessions": 1601,
+  "output_save_start": 800,
   "output_save_end": 3001,
-  "output_save_step": 200
+  "output_save_step": 800
 }

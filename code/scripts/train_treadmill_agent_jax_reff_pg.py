@@ -78,45 +78,21 @@ N_STEPS_PER_UPDATE = 1000
 # each action and summed over horizon RPE_H -> a fixed forward kernel on the RPE (see the loss).
 RPE_K = 4              # context window length (observations only)
 RPE_H = 20             # credit horizon
-RPE_TAU = 100.0          # exponential-filter time constant -> lambda = exp(-1/RPE_TAU)
 REWARD_PRED_HIDDEN = 64
 
-# --- per-(obs, action) credit filters (persist across update blocks) ---
-# Track (obs_size, action_size) credit matrices. For each action a: eligibility[:, a] is a
-# low-pass of the observation that triggered a. Two credit streams share this eligibility:
-#   reward stream     = low-pass_{CREDIT_DECAY_REWARD}(eligibility * reward)
-#   prediction stream = low-pass_{CREDIT_DECAY_PRED}(eligibility * reward_prediction)
-# The credit is (reward stream - prediction stream); the reward stream decays more slowly.
-# At each step the actor is weighted by  current_obs . credit[:, a_taken]  (see compute_a2c_loss).
-CREDIT_ELIG_DECAY = 0.8    # eligibility-trace retention per step (higher -> longer obs memory)
-CREDIT_DECAY_REWARD = 0.975  # reward-stream credit retention (slower decay)
-CREDIT_DECAY_PRED = 0.975   # prediction-stream credit retention (faster decay)
 # The credit feature at each anchor is the flattened stack of the last N_OBS_TIMESTEPS (obs+reward)
-# vectors, so the per-action credit vector represents a short window of recent timesteps, not just
-# the current one. This widens the eligibility/credit matrices to (N_OBS_TIMESTEPS*feat_dim, A).
+# vectors (sizes the per-action credit matrices carried in train_state.action_elig / action_credit_*).
 N_OBS_TIMESTEPS = 1
-GLOBAL_REWARD_DECAY = 0.999  # Weight for the global reward signal
-DELAY_DECAY = 0.9           # per-step discount on future rewards in the advantage (weight = DELAY_DECAY^delay)
 # Actor single-timestep reward predictor E[r_t | F_{t-1}] (readout on the actor hidden state), weight
 # on its MSE loss.
 REWARD_PRED_WEIGHT = 0.1 # was 0.1
-# M leak: the expected-reward accumulator in M = 1 - sum_{k=t'}^{tau} lambda^(tau-k) E[r_k|o_{k-1}]
-# decays by M_DECAY each step. This bounds M and, crucially, lets M RECOVER during reward-less travel
-# (E[r]~0), so a negative M can be "waited out" by leaving the patch -> the next-patch reward is
-# credited positively instead of being crushed by the accumulated dry-spell penalty. lambda -> 1 is
-# the old undecayed cumulative sum; smaller values recover faster. 1/(1-M_DECAY) is the memory length.
-M_DECAY = 0.99
 # Value-bootstrap horizon k for the advantage A_t = M_t * sum_{s=t}^{t+K} gamma^(s-t) r_s + gamma^K V_{t+K} - V_t.
 # V (critic head) supplies the baseline and the bootstrap; requires critic_weight > 0 to train V.
 K_BOOT = 20
-# Weight on the opportunity-cost rho term in the M accumulator: contribution = E[r] + RHO_WEIGHT*rho.
-# RHO_WEIGHT=0 -> pure forecast E[r] (EXACTLY the pre-rho behavior); =1 -> E[r]+rho (the balanced sum,
-# since E[r] and rho both average to the reward rate, so each contributes ~half). Larger -> more
-# opportunity-cost pressure (leans on the smooth, non-collapsing rho).
-RHO_WEIGHT = 0 #0.01
-# Overall scale on the M accumulator: M = 1 - M_SCALE * cumrp. Used identically in the loss and in the
-# stored/plotted M so the saved trace matches what the gradient sees.
-M_SCALE = 0.5
+# NOTE: the M-modulation leak and overall scale are now CONFIG fields, config.m_decay / config.m_scale
+# (threaded into collect_trajectory / compute_a2c_loss). M = 1 - m_scale * (L_non_belief + 0.5 <belief, L_belief>): a
+# belief-INDEPENDENT baseline L_non_belief (leaky sum E[r]) plus the belief-weighted S_C gating term L_belief. Both
+# decay by m_decay/step and reset at each reward; see the loss for the full definition.
 # Belief head: the critic produces a hidden_size belief b_t; a feedforward net predicts the next
 # N_BELIEF_PREDICT [obs, reward] tuples from it (belief-prediction MSE, weight BELIEF_PRED_WEIGHT).
 # S_C(b_l, b_t) = 1 + 0.5*cos_sim(b_l, b_t) in [0.5, 1.5] gates each past E[r_l] penalty in M: only
@@ -128,7 +104,7 @@ BELIEF_PRED_HIDDEN = 64
 BELIEF_PRED_WEIGHT = 1.0
 
 
-@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'n_steps', 'obs_size', 'intervention_fn'])
+@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'n_steps', 'obs_size', 'intervention_fn', 'use_belief'])
 def collect_trajectory(
     train_state: TrainState,
     env_states: TreadmillEnvState,
@@ -139,7 +115,10 @@ def collect_trajectory(
     hidden_size: int,
     obs_size: int,
     n_steps: int,
+    m_decay: float = 0.99,
+    m_scale: float = 0.5,
     intervention_fn=None,
+    use_belief: bool = True,
 ) -> Tuple[TrajectoryData, TrainState, TreadmillEnvState]:
     """Collect trajectory using lax.scan over time steps."""
 
@@ -149,8 +128,6 @@ def collect_trajectory(
         unit_noise_std=unit_noise_std,
         rnn_type=rnn_type,
         obs_size=obs_size,
-        reward_pred_hidden_size=REWARD_PRED_HIDDEN,
-        reward_pred_horizon=RPE_H + 1,
         belief_dim=BELIEF_DIM,
         belief_pred_hidden=BELIEF_PRED_HIDDEN,
         belief_pred_horizon=N_BELIEF_PREDICT,
@@ -160,11 +137,11 @@ def collect_trajectory(
 
     step_num = jnp.zeros_like(env_states.exp_filtered_reward_rate)  # (num_envs,)
     n_envs = env_states.exp_filtered_reward_rate.shape[0]
-    cumrp0 = jnp.zeros((n_envs,))                                   # scalar M accumulator (sum E[r]+rho)
-    Dvec0 = jnp.zeros((n_envs, BELIEF_DIM))                         # belief-weighted vector accumulator (S_C)
+    L_non_belief0 = jnp.zeros((n_envs,))          # scalar baseline accumulator (leaky sum E[r], belief-independent)
+    L_belief0 = jnp.zeros((n_envs, BELIEF_DIM))   # belief-weighted vector accumulator (S_C)
 
     def scan_step(carry, _):
-        train_state, env_states, step_num, cumrp, Dvec = carry
+        train_state, env_states, step_num, L_non_belief, L_belief = carry
         rng_key = train_state.rng_key
 
         # Sample actions using current observations (from previous step)
@@ -209,15 +186,6 @@ def collect_trajectory(
 
         new_obs, new_env_states, rewards, dones, infos = step_results
 
-        new_reward_rate = (
-            GLOBAL_REWARD_DECAY * new_env_states.exp_filtered_reward_rate 
-            + (1 - GLOBAL_REWARD_DECAY) * rewards
-        )
-
-        new_env_states = new_env_states.replace(
-            exp_filtered_reward_rate=new_reward_rate,
-        )
-
         # Update train state with new info. (Per-(obs, action) credit is computed downstream in
         # compute_a2c_loss, which reuses the reward-predictor net; the filter state carried in
         # train_state.action_elig / action_credit_* is advanced there.)
@@ -230,14 +198,16 @@ def collect_trajectory(
             prev_reward=rewards,
         )
 
-        # Running modulation M = 1 - M_SCALE * (cumrp + 0.5 <belief_t, Dvec_t>), the S_C-gated leaky sum
-        # since the last reward (reset after reward, pre-update carry). E[r_t] is the belief's lag-0
-        # reward channel (belief now supplies the reward forecast). Matches the loss exactly.
+        # Running modulation M = 1 - m_scale * (L_non_belief + 0.5 <belief_t, L_belief_t>), the S_C-gated leaky sum
+        # since the last reward (reset after reward, pre-update carry). L_non_belief is the belief-INDEPENDENT
+        # baseline (leaky sum E[r]); the 0.5<belief, L_belief> term adds the context-similarity gating. E[r_t] is
+        # the dedicated 1-step head. Matches the loss exactly.
         er0 = reward_pred_1step                                            # E[r_t] from the dedicated 1-step head
-        M = 1.0 - M_SCALE * (cumrp + 0.5 * jnp.sum(belief * Dvec, axis=-1))
-        keep = jnp.where(rewards > 0, 0.0, M_DECAY)                        # reset after reward
-        cumrp_new = (er0 + RHO_WEIGHT * new_reward_rate) + keep * cumrp
-        Dvec_new = er0[:, None] * belief + keep[:, None] * Dvec            # belief is unit-norm
+        belief_sc = belief if use_belief else jnp.zeros_like(belief)       # ablate: no S_C gating (baseline survives)
+        M = 1.0 - m_scale * (L_non_belief + 0.5 * jnp.sum(belief_sc * L_belief, axis=-1))
+        keep = jnp.where(rewards > 0, 0.0, m_decay)                        # reset after reward
+        L_non_belief_new = er0 + keep * L_non_belief                                     # belief-independent baseline
+        L_belief_new = er0[:, None] * belief_sc + keep[:, None] * L_belief               # belief is unit-norm
 
         # Return step data (logits stored are the gated logits actually used for decisions)
         step_data = {
@@ -255,16 +225,16 @@ def collect_trajectory(
             'pred_reward_rate': pred_reward_rate,
             'belief_pred': belief_pred,   # (num_envs, N_BELIEF_PREDICT*(obs+1)) belief [obs, reward] forecast
             'reward_pred_1step': reward_pred_1step,   # (num_envs,) dedicated E[r_t] head (M's E[r])
-            'M': M,                       # (num_envs,) reward modulation (see above)
+            'M': M,                       # (num_envs,) reward modulation M (stored under legacy 'M' field)
             'belief': belief,             # (num_envs, BELIEF_DIM) critic belief vector for S_C context gating
         } | infos
 
-        return (new_train_state, new_env_states, jnp.zeros(rewards.shape[0]), cumrp_new, Dvec_new), step_data
+        return (new_train_state, new_env_states, jnp.zeros(rewards.shape[0]), L_non_belief_new, L_belief_new), step_data
 
     # Run scan over time steps using compile-time constant
     (final_train_state, final_env_states, _, _, _), trajectory_data = lax.scan(
         scan_step,
-        (train_state, env_states, step_num, cumrp0, Dvec0),
+        (train_state, env_states, step_num, L_non_belief0, L_belief0),
         None,
         length=n_steps
     )
@@ -296,6 +266,9 @@ def compute_a2c_loss(
     unit_noise_std: float,
     rnn_type: str,
     obs_size: int,
+    m_decay: float = 0.99,
+    m_scale: float = 0.5,
+    use_belief: bool = True,
 ) -> Tuple[jnp.ndarray, Tuple[Dict[str, jnp.ndarray], Any, Any]]:
     """Compute A2C loss; collect_trajectory is called here so BPTT flows through the scan."""
 
@@ -309,31 +282,17 @@ def compute_a2c_loss(
         hidden_size=hidden_size,
         obs_size=obs_size,
         n_steps=N_STEPS_PER_UPDATE,
+        m_decay=m_decay,
+        m_scale=m_scale,
+        use_belief=use_belief,
     )
 
-    logits = trajectory.logits            # (B, T, A)rm -rf */reff_pg_exp_gru_initial_prob_offset_v2
+    logits = trajectory.logits            # (B, T, A)
     rewards = trajectory.rewards          # (B, T)
     N = N_STEPS_PER_UPDATE                 # chunk length (== T)
     B = rewards.shape[0]                    # num envs
-    H = min(RPE_H, N - 1)                  # lag horizon (capped: no target can be > N-1 steps ahead)
 
-    # --- k-step value-bootstrap advantage with M-gated reward (note #1) ---------------------------
-    #   A_t = M_t * sum_{s=t}^{t+K} gamma^(s-t) r_s  +  gamma^K V_{t+K}  -  V_t
-    # where M_t = 1 - sum_{l=t'}^{t} lambda^(t-l) E[r_l|s_l]  (t' = previous reward before t; the leaky
-    # "unrealized expected reward" factor built below). M_t gates the K-step ACTUAL reward; the learned
-    # value V supplies the baseline (-V_t) and the bootstrap (gamma^K V_{t+K}), which together REPLACE
-    # the old reset-at-reward opportunity cost -- V represents the continuation value (incl. the outside
-    # option after leaving), so the credit no longer has to reach the next reward by hand.
-    #   actor:  -mean_t  A_t * log pi(a_t | s_t)        (A_t stop-gradded)
-    #   critic: mean_t ( V_t - stopgrad(M_t G_t + gamma^K V_{t+K}) )^2      (requires critic_weight > 0)
-    # E[r] and the belief both come from the CRITIC now (the actor reward head was dropped): the belief
-    # forecast's lag-0 reward channel is E[r_t], and the belief itself is the S_C context. Both are
-    # produced inline in collect_trajectory and carried on the trajectory (differentiable here).
-    # belief forecast: from each belief b_t, predict the next N_BELIEF_PREDICT [sensory obs, reward]
-    # tuples (t..t+NB-1). Produced inline in collect_trajectory (trajectory.belief_pred) so it's
-    # differentiable here -- the MSE trains belief_readout + the belief FF net + the critic's recurrent
-    # weights. The belief's REWARD channels ARE the reward forecast E[r] (the actor reward head was
-    # dropped); its lag-0 channel feeds M. This is the ONLY term shaping the belief; the S_C use is s.g.
+    # belief prediction loss: predict the next N_BELIEF_PREDICT [obs, reward] tuples from the critic belief b_t
     belief_pred = trajectory.belief_pred.reshape(B, N, N_BELIEF_PREDICT, obs_size + 1)  # (B, N, NB, obs+1)
     bj = jnp.clip(jnp.arange(N)[:, None] + jnp.arange(N_BELIEF_PREDICT)[None, :], 0, N - 1)  # (N, NB)  t..t+NB-1
     obs_tgt = lax.stop_gradient(trajectory.observations[:, :, :obs_size])[:, bj]        # (B, N, NB, obs)
@@ -341,8 +300,7 @@ def compute_a2c_loss(
     belief_target = jnp.concatenate([obs_tgt, rew_tgt], axis=-1)                        # (B, N, NB, obs+1)
     belief_pred_loss = jnp.mean((belief_pred - belief_target) ** 2)
 
-    # dedicated 1-step reward head E[r_t] (critic-side, its own MSE -> a strong, un-swamped reward
-    # signal that forces the critic to track within-patch depletion). This is E[r] for M.
+    # dedicated 1-step reward head E[r_t]
     reward_pred_1step = trajectory.reward_pred_1step                      # (B, N)  E[r_t]
     reward_pred_1step_loss = jnp.mean((reward_pred_1step - lax.stop_gradient(rewards)) ** 2)
 
@@ -350,37 +308,23 @@ def compute_a2c_loss(
     rewards_sg = lax.stop_gradient(rewards)
     is_reward = rewards_sg > 0                                           # (B, N)
 
-    # Modulation M(tau) = 1 - sum_{k=t'}^{tau-1} lambda^(tau-1-k) (E[r_k|o_{k-1}] + rho_k), t' = prev
-    # reward: the lag-0 forecast PLUS the exp-filtered reward rate rho (opportunity cost) accumulated
-    # since that reward, LEAKY (decays by M_DECAY/step) and reset AFTER each reward (the scan emits the
-    # pre-update carry). M goes NEGATIVE the longer the agent waits (overdue). The rho term is a per-step
-    # opportunity cost that does NOT collapse when the predictor drives E[r]->0 in a depleted patch --
-    # rho keeps the accumulator climbing, so the overdue/leave signal survives. The leak lets M RECOVER
-    # during reward-less travel (E[r]~0, rho small) so a negative M can be waited out by leaving.
-    rho = lax.stop_gradient(trajectory.exp_filtered_reward_rate)         # (B, N)  exp-filtered reward rate
-    # Belief-CONTEXT gating (S_C): each past E[r_l] penalty is weighted by S_C(b_l, b_t) = 1 + 0.5
-    # cos(b_l, b_t) in [0.5, 1.5] -- carried forward only while the context (belief) still matches, so
-    # leaving a patch (belief changes) stops carrying the old patch's penalty. With unit-normalized
-    # beliefs the weighted sum = cumrp + 0.5 <b_hat_t, D_t>, where cumrp is the scalar accumulator and
-    # D_t a leaky VECTOR accumulator of E[r_l] b_hat_l -- both scans, so M stays O(N) (no all-pairs
-    # cos-sim). b_hat is stop-gradded: the belief is shaped only by the prediction MSE, not the advantage.
     b_hat = lax.stop_gradient(trajectory.belief)                        # (B, N, HID)
-    b_hat = b_hat / (jnp.linalg.norm(b_hat, axis=-1, keepdims=True) + 1e-8)
+    if not use_belief:
+        b_hat = jnp.zeros_like(b_hat)                                   # ablate: no S_C gating (baseline survives)
+    b_hat = b_hat / (jnp.linalg.norm(b_hat, axis=-1, keepdims=True) + 1e-8)  # unit (stays zero when ablated)
     def _cum_scan(carry, xt):
-        C, D = carry                                                    # C: (B,)  D: (B, HID)  pre-update
-        rp_k, rho_k, bhat_k, isr = xt
-        contrib_C = rp_k + RHO_WEIGHT * rho_k
-        contrib_D = rp_k[:, None] * bhat_k                              # E[r_k] * b_hat_k
-        keep = jnp.where(isr, 0.0, M_DECAY)                            # (B,)  reset after reward
-        return (contrib_C + keep * C, contrib_D + keep[:, None] * D), (C, D)
-    _, (cumrp, D) = lax.scan(
+        L_non_belief, L_belief = carry                     # L_non_belief: (B,)  L_belief: (B, HID)  pre-update
+        rp_k, bhat_k, isr = xt
+        contrib = rp_k[:, None] * bhat_k                                # E[r_k] * b_hat_k
+        keep = jnp.where(isr, 0.0, m_decay)                            # (B,)  reset after reward
+        return (rp_k + keep * L_non_belief, contrib + keep[:, None] * L_belief), (L_non_belief, L_belief)
+    _, (L_non_belief, L_belief) = lax.scan(
         _cum_scan, (jnp.zeros((B,)), jnp.zeros((B, BELIEF_DIM))),
-        (jnp.swapaxes(rp_sg, 0, 1), jnp.swapaxes(rho, 0, 1),
+        (jnp.swapaxes(rp_sg, 0, 1),
          jnp.swapaxes(b_hat, 0, 1), jnp.swapaxes(is_reward, 0, 1)))
-    cumrp = jnp.swapaxes(cumrp, 0, 1)                                    # (B, N)  scalar accumulator (pre-update)
-    D     = jnp.swapaxes(D, 0, 1)                                        # (B, N, HID)  vector accumulator
-    sc_sum = cumrp + 0.5 * jnp.sum(b_hat * D, axis=-1)                   # (B, N)  E[r_l] weighted by S_C
-    M = 1.0 - M_SCALE * sc_sum                                           # (B, N)  belief-gated modulation
+    L_non_belief = jnp.swapaxes(L_non_belief, 0, 1)   # (B, N)  scalar baseline accumulator (belief-independent)
+    L_belief     = jnp.swapaxes(L_belief, 0, 1)       # (B, N, HID)  belief-weighted vector accumulator
+    M = 1.0 - m_scale * (L_non_belief + 0.5 * jnp.sum(b_hat * L_belief, axis=-1))  # (B, N)  baseline + S_C-gated modulation
 
     # k-step value-bootstrap advantage (see note #1). G_t = sum_{i=0}^{K} gamma^i r_{t+i}; near the
     # chunk end the window and bootstrap shrink to the actual remaining horizon `gap` so they stay
@@ -447,112 +391,7 @@ def compute_a2c_loss(
     return total_loss, (metrics, jax.lax.stop_gradient(final_train_state), jax.lax.stop_gradient(final_env_states))
 
 
-def compute_n_step_returns(rewards, gamma, v_t, reverse=True):
-    """
-    Compute n-step returns for n=0 to max_n efficiently
-    
-    Args:
-        rewards: (batch_size, time_steps) - rewards at each timestep
-        gamma: discount factor
-        
-    Returns:
-        n_step_returns: (batch_size, time_steps, max_n+1) where [:, :, n] contains n-step returns
-    """
-
-    def compute_return(carry, reward):
-        (i, rolling_sum) = carry
-        rolling_sum = reward + gamma * rolling_sum
-        return (i+1, rolling_sum), rolling_sum
-    
-    _, returns = lax.scan(
-        compute_return,
-        (0, v_t),
-        rewards,
-        reverse=reverse,
-    )
-    return returns
-
-
-def nearest_future_reward(rewards, decay):
-    """For each t, decay^(k-t) * r_k where k >= t is the CLOSEST future step with a reward (r_k > 0).
-
-    Only the nearest reward is used (not the discounted sum of all future rewards). Reverse recurrence:
-        v_t = r_t                if r_t > 0   (the reward is at t: decay^0 * r_t)
-        v_t = decay * v_{t+1}    otherwise    (carry the nearest future reward one step closer)
-    with v beyond the block == 0.
-
-    Args:
-        rewards: (time_steps,) per-step rewards for one env.
-        decay:   per-step discount.
-    Returns:
-        (time_steps,) nearest-future-reward values.
-    """
-    def step(carry, r):
-        v = jnp.where(r > 0.0, r, decay * carry)
-        return v, v
-
-    _, out = lax.scan(step, 0.0, rewards, reverse=True)
-    return out
-
-
-def forward_value_targets(rewards, lam, anchor):
-    """Forward discounted accumulation of value from a chunk-start anchor.
-
-        target[0] = anchor
-        target[t] = lam * target[t-1] + rewards[t-1]
-                  = lam^t * anchor + sum_{s=0}^{t-1} lam^{t-1-s} rewards[s]
-
-    Args:
-        rewards: (time_steps,) per-step rewards for one env.
-        lam: discount.
-        anchor: scalar value v[0,0] used as the t=0 target.
-    Returns:
-        (time_steps,) forward-accumulated value targets (target[0] == anchor).
-    """
-    def step(carry, r):
-        out = carry                 # emit the accumulated value BEFORE this step's reward
-        new = lam * carry + r       # advance the accumulator for the next step
-        return new, out
-
-    _, targets = lax.scan(step, anchor, rewards)
-    return targets
-
-
-def compute_gaes(rewards, values, gamma, lam):
-    """
-    rewards: [B, T]
-    values:  [B, T+1]
-    --> returns advantages: [B, T]
-    """
-
-    # Move time to axis 0, because scan iterates over axis 0
-    rewards_t = rewards.T            # [T, B]
-    values_t  = values.T             # [T+1, B]
-
-    def gae_scan(carry, x_t):
-        reward_t, value_t, value_tp1 = x_t
-        delta = reward_t + gamma * value_tp1 - value_t
-        gae = delta + gamma * lam * carry
-        return gae, gae
-
-    # xs is a tuple of time-major sequences
-    xs = (rewards_t[:-1], values_t[:-1], values_t[1:])   # shapes all [T, B]
-
-    # reverse=True makes scan go from T-1 → 0
-    _, adv_t = jax.lax.scan(
-        gae_scan,
-        init=jnp.zeros(rewards.shape[0]),  # [B]
-        xs=xs,
-        reverse=True
-    )
-
-    return jnp.concatenate((
-        adv_t.T,
-        jnp.zeros((rewards.shape[0], 1))
-    ), axis=1)
-
-
-@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'obs_size'])
+@partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'obs_size', 'use_belief'])
 def train_step(
     train_state: TrainState,
     env_states: TreadmillEnvState,
@@ -570,9 +409,12 @@ def train_step(
     unit_noise_std: float,
     rnn_type: str,
     obs_size: int,
+    m_decay: float = 0.99,
+    m_scale: float = 0.5,
+    use_belief: bool = True,
 ) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
     """Single training step"""
-    
+
     grad_fn = jax.grad(compute_a2c_loss, has_aux=True)
     grads, (metrics, final_train_state, final_env_states) = grad_fn(
         train_state.params,
@@ -591,6 +433,9 @@ def train_step(
         unit_noise_std,
         rnn_type,
         obs_size,
+        m_decay,
+        m_scale,
+        use_belief,
     )
 
     metrics['grad_norm'] = optax.global_norm(grads)
@@ -652,12 +497,17 @@ class TrainingConfig:
     gamma: float = 0.999 # 0.987
     learning_rate: float = 2.5e-5 # 1e-4
     reward_pred_lr_scale: float = 0.1  # reward-predictor LR = learning_rate * this; <1 -> slower
+    m_decay: float = 0.99  # M-modulation leak: per-step decay of L_non_belief/L_belief accumulators (reset at rewards)
+    m_scale: float = 0.5   # overall scale on the M modulation: M = 1 - m_scale * (L_non_belief + 0.5 <belief, L_belief>)
     rnn_type: str = 'GRU'
     init_scale: float = 1.0
 
     # Training params (runtime configurable)
     seed: int = 0
     n_sessions: int = 5000
+
+    # Belief gating
+    use_belief: bool = True
 
     # Logging
     output_state_save_rate: int = 100
@@ -723,7 +573,7 @@ def load_config_from_json(filepath: str) -> TrainingConfig:
     return config.replace(**config_dict)
 
 
-@partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'unit_noise_std', 'rnn_type', 'obs_size'])
+@partial(jax.jit, static_argnames=['action_size', 'hidden_size', 'unit_noise_std', 'rnn_type', 'obs_size', 'use_belief'])
 def run_session_updates_with_metrics(
     train_state: TrainState,
     env_states: TreadmillEnvState,
@@ -741,12 +591,15 @@ def run_session_updates_with_metrics(
     unit_noise_std: float,
     rnn_type: str,
     obs_size: int,
+    m_decay: float = 0.99,
+    m_scale: float = 0.5,
+    use_belief: bool = True,
 ) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
     """Run all training updates with full metrics collection"""
-    
+
     def update_step(carry, _):
         train_state, env_states = carry
-        
+
         new_train_state, new_env_states, metrics = train_step(
             train_state=train_state,
             env_states=env_states,
@@ -764,6 +617,9 @@ def run_session_updates_with_metrics(
             unit_noise_std=unit_noise_std,
             rnn_type=rnn_type,
             obs_size=obs_size,
+            m_decay=m_decay,
+            m_scale=m_scale,
+            use_belief=use_belief,
         )
         
         return (new_train_state, new_env_states), metrics
@@ -823,9 +679,6 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
         unit_noise_std=config.unit_noise_std,
         rng_key=net_init_key,
         init_scale=config.init_scale,
-        reward_pred_hidden_size=REWARD_PRED_HIDDEN,
-        window_dim=RPE_K * (config.obs_size + 1) + config.action_size + 1,
-        reward_pred_horizon=RPE_H + 1,
         belief_dim=BELIEF_DIM,
         belief_pred_hidden=BELIEF_PRED_HIDDEN,
         belief_pred_horizon=N_BELIEF_PREDICT,
@@ -929,6 +782,9 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
             unit_noise_std=config.unit_noise_std,
             rnn_type=config.rnn_type,
             obs_size=config.obs_size,
+            m_decay=config.m_decay,
+            m_scale=config.m_scale,
+            use_belief=config.use_belief,
         )
 
         # pprint(train_state.params)
@@ -1002,6 +858,9 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
                 hidden_size=config.hidden_size,
                 obs_size=config.obs_size,
                 n_steps=N_UPDATES_PER_SESSION * N_STEPS_PER_UPDATE,
+                m_decay=config.m_decay,
+                m_scale=config.m_scale,
+                use_belief=config.use_belief,
             )
             traj_dicts = [
                 serialization.to_state_dict(
@@ -1067,9 +926,6 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
         unit_noise_std=config.unit_noise_std,
         rng_key=net_init_key,
         init_scale=config.init_scale,
-        reward_pred_hidden_size=REWARD_PRED_HIDDEN,
-        window_dim=RPE_K * (config.obs_size + 1) + config.action_size + 1,
-        reward_pred_horizon=RPE_H + 1,
         belief_dim=BELIEF_DIM,
         belief_pred_hidden=BELIEF_PRED_HIDDEN,
         belief_pred_horizon=N_BELIEF_PREDICT,
@@ -1156,7 +1012,10 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
             hidden_size=config.hidden_size,
             obs_size=config.obs_size,
             n_steps=session_steps,
+            m_decay=config.m_decay,
+            m_scale=config.m_scale,
             intervention_fn=intervention_fn,
+            use_belief=config.use_belief,
         )
         
         # Extract episode metrics

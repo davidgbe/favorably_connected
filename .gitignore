@@ -8,3 +8,4 @@ data/**/*
 checkpoints/**/*
 figures/**/*
 saved_states/**/*
+logs/**/*
