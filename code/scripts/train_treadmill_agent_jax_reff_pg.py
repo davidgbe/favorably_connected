@@ -117,10 +117,16 @@ def collect_trajectory(
     n_steps: int,
     m_decay: float = 0.99,
     m_scale: float = 0.5,
+    L_non_belief_in=None,
+    L_belief_in=None,
     intervention_fn=None,
     use_belief: bool = True,
-) -> Tuple[TrajectoryData, TrainState, TreadmillEnvState]:
-    """Collect trajectory using lax.scan over time steps."""
+) -> Tuple[TrajectoryData, TrainState, TreadmillEnvState, jnp.ndarray, jnp.ndarray]:
+    """Collect trajectory using lax.scan over time steps.
+
+    L_non_belief_in / L_belief_in seed the M-modulation accumulators (leaky sum E[r] and its
+    belief-weighted counterpart) so the trace is CONTINUOUS across chunks; pass None to start from
+    zero. Returns the final accumulator values so the caller can thread them into the next chunk."""
 
     network = A2CRNNFlax(
         action_size=2,  # Fixed ACTION_SIZE
@@ -137,8 +143,9 @@ def collect_trajectory(
 
     step_num = jnp.zeros_like(env_states.exp_filtered_reward_rate)  # (num_envs,)
     n_envs = env_states.exp_filtered_reward_rate.shape[0]
-    L_non_belief0 = jnp.zeros((n_envs,))          # scalar baseline accumulator (leaky sum E[r], belief-independent)
-    L_belief0 = jnp.zeros((n_envs, BELIEF_DIM))   # belief-weighted vector accumulator (S_C)
+    # seed the accumulators from the caller (threaded across chunks) or from zero
+    L_non_belief0 = jnp.zeros((n_envs,)) if L_non_belief_in is None else L_non_belief_in   # scalar baseline (leaky sum E[r])
+    L_belief0 = jnp.zeros((n_envs, BELIEF_DIM)) if L_belief_in is None else L_belief_in    # belief-weighted vector (S_C)
 
     def scan_step(carry, _):
         train_state, env_states, step_num, L_non_belief, L_belief = carry
@@ -232,7 +239,7 @@ def collect_trajectory(
         return (new_train_state, new_env_states, jnp.zeros(rewards.shape[0]), L_non_belief_new, L_belief_new), step_data
 
     # Run scan over time steps using compile-time constant
-    (final_train_state, final_env_states, _, _, _), trajectory_data = lax.scan(
+    (final_train_state, final_env_states, _, L_non_belief_final, L_belief_final), trajectory_data = lax.scan(
         scan_step,
         (train_state, env_states, step_num, L_non_belief0, L_belief0),
         None,
@@ -246,7 +253,7 @@ def collect_trajectory(
 
     trajectory = TrajectoryData(**trajectory_data)
 
-    return trajectory, final_train_state, final_env_states
+    return trajectory, final_train_state, final_env_states, L_non_belief_final, L_belief_final
 
 
 def compute_a2c_loss(
@@ -268,11 +275,17 @@ def compute_a2c_loss(
     obs_size: int,
     m_decay: float = 0.99,
     m_scale: float = 0.5,
+    L_non_belief_in=None,
+    L_belief_in=None,
     use_belief: bool = True,
-) -> Tuple[jnp.ndarray, Tuple[Dict[str, jnp.ndarray], Any, Any]]:
-    """Compute A2C loss; collect_trajectory is called here so BPTT flows through the scan."""
+) -> Tuple[jnp.ndarray, Tuple[Dict[str, jnp.ndarray], Any, Any, jnp.ndarray, jnp.ndarray]]:
+    """Compute A2C loss; collect_trajectory is called here so BPTT flows through the scan.
 
-    trajectory, final_train_state, final_env_states = collect_trajectory(
+    L_non_belief_in / L_belief_in seed the M accumulators (chunk-start values, threaded across chunks);
+    they seed BOTH the collect-side scan and the loss-side _cum_scan so M is continuous. The final
+    (chunk-end) accumulators are returned in the aux tuple (stop-gradded) for the next chunk."""
+
+    trajectory, final_train_state, final_env_states, L_non_belief_final, L_belief_final = collect_trajectory(
         train_state=train_state.replace(params=params),
         env_states=env_states,
         env_params=env_params,
@@ -284,6 +297,8 @@ def compute_a2c_loss(
         n_steps=N_STEPS_PER_UPDATE,
         m_decay=m_decay,
         m_scale=m_scale,
+        L_non_belief_in=L_non_belief_in,
+        L_belief_in=L_belief_in,
         use_belief=use_belief,
     )
 
@@ -318,8 +333,12 @@ def compute_a2c_loss(
         contrib = rp_k[:, None] * bhat_k                                # E[r_k] * b_hat_k
         keep = jnp.where(isr, 0.0, m_decay)                            # (B,)  reset after reward
         return (rp_k + keep * L_non_belief, contrib + keep[:, None] * L_belief), (L_non_belief, L_belief)
+    # seed from the threaded chunk-start accumulators (same seeds the collect-side scan used), so the
+    # advantage's M is continuous across chunks. stop-gradded -> no BPTT across the chunk boundary.
+    L_non_belief_seed = jnp.zeros((B,)) if L_non_belief_in is None else lax.stop_gradient(L_non_belief_in)
+    L_belief_seed = jnp.zeros((B, BELIEF_DIM)) if L_belief_in is None else lax.stop_gradient(L_belief_in)
     _, (L_non_belief, L_belief) = lax.scan(
-        _cum_scan, (jnp.zeros((B,)), jnp.zeros((B, BELIEF_DIM))),
+        _cum_scan, (L_non_belief_seed, L_belief_seed),
         (jnp.swapaxes(rp_sg, 0, 1),
          jnp.swapaxes(b_hat, 0, 1), jnp.swapaxes(is_reward, 0, 1)))
     L_non_belief = jnp.swapaxes(L_non_belief, 0, 1)   # (B, N)  scalar baseline accumulator (belief-independent)
@@ -388,7 +407,8 @@ def compute_a2c_loss(
         'M_frac_neg': jnp.mean((M < 0).astype(jnp.float32)),   # fraction of steps that are "overdue"
     }
 
-    return total_loss, (metrics, jax.lax.stop_gradient(final_train_state), jax.lax.stop_gradient(final_env_states))
+    return total_loss, (metrics, jax.lax.stop_gradient(final_train_state), jax.lax.stop_gradient(final_env_states),
+                        jax.lax.stop_gradient(L_non_belief_final), jax.lax.stop_gradient(L_belief_final))
 
 
 @partial(jax.jit, static_argnames=['rnn_type', 'hidden_size', 'obs_size', 'use_belief'])
@@ -411,12 +431,15 @@ def train_step(
     obs_size: int,
     m_decay: float = 0.99,
     m_scale: float = 0.5,
+    L_non_belief_in=None,
+    L_belief_in=None,
     use_belief: bool = True,
-) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
-    """Single training step"""
+) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray], jnp.ndarray, jnp.ndarray]:
+    """Single training step. L_non_belief_in / L_belief_in seed the M accumulators (threaded across
+    chunks); the final accumulators are returned for the next chunk."""
 
     grad_fn = jax.grad(compute_a2c_loss, has_aux=True)
-    grads, (metrics, final_train_state, final_env_states) = grad_fn(
+    grads, (metrics, final_train_state, final_env_states, L_non_belief_final, L_belief_final) = grad_fn(
         train_state.params,
         train_state,
         env_states,
@@ -435,6 +458,8 @@ def train_step(
         obs_size,
         m_decay,
         m_scale,
+        L_non_belief_in,
+        L_belief_in,
         use_belief,
     )
 
@@ -455,7 +480,7 @@ def train_step(
         opt_state=new_opt_state,
     )
     
-    return final_train_state, final_env_states, metrics
+    return final_train_state, final_env_states, metrics, L_non_belief_final, L_belief_final
 
 # Configuration matching your original hyperparameters
 @struct.dataclass
@@ -597,10 +622,16 @@ def run_session_updates_with_metrics(
 ) -> Tuple[TrainState, TreadmillEnvState, Dict[str, jnp.ndarray]]:
     """Run all training updates with full metrics collection"""
 
-    def update_step(carry, _):
-        train_state, env_states = carry
+    # M-modulation accumulators, threaded across the chunks (updates) of THIS session; start from zero
+    # each session (aligned with the fresh env reset at session start).
+    n_envs = env_states.exp_filtered_reward_rate.shape[0]
+    L_non_belief0 = jnp.zeros((n_envs,))
+    L_belief0 = jnp.zeros((n_envs, BELIEF_DIM))
 
-        new_train_state, new_env_states, metrics = train_step(
+    def update_step(carry, _):
+        train_state, env_states, L_non_belief, L_belief = carry
+
+        new_train_state, new_env_states, metrics, L_non_belief, L_belief = train_step(
             train_state=train_state,
             env_states=env_states,
             env_params=env_params,
@@ -619,15 +650,17 @@ def run_session_updates_with_metrics(
             obs_size=obs_size,
             m_decay=m_decay,
             m_scale=m_scale,
+            L_non_belief_in=L_non_belief,
+            L_belief_in=L_belief,
             use_belief=use_belief,
         )
-        
-        return (new_train_state, new_env_states), metrics
-    
-    # Run scan over all updates
-    (final_train_state, final_env_states), all_metrics = lax.scan(
+
+        return (new_train_state, new_env_states, L_non_belief, L_belief), metrics
+
+    # Run scan over all updates (M accumulators thread through the carry)
+    (final_train_state, final_env_states, _, _), all_metrics = lax.scan(
         update_step,
-        (train_state, env_states),
+        (train_state, env_states, L_non_belief0, L_belief0),
         None,
         length=N_UPDATES_PER_SESSION,
     )
@@ -848,7 +881,7 @@ def train_a2c_jax(config: TrainingConfig = None, load_path: str = None):
                 prev_reward=jnp.zeros((config.n_save_envs,)),
                 prev_obs=save_obs,
             )
-            trajectory, _, _ = collect_trajectory(
+            trajectory, _, _, _, _ = collect_trajectory(
                 train_state=save_train_state,
                 env_states=save_env_states,
                 env_params=env_params,
@@ -1002,7 +1035,7 @@ def evaluate_a2c_jax(config: TrainingConfig, checkpoint_path: str, save_trajecto
         )
 
         # Run episode (using a reasonable episode length)
-        trajectory, final_train_state, final_env_states = collect_trajectory(
+        trajectory, final_train_state, final_env_states, _, _ = collect_trajectory(
             train_state=train_state,
             env_states=env_states,
             env_params=env_params,

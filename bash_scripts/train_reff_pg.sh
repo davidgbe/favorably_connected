@@ -13,5 +13,5 @@ export CUDA_VISIBLE_DEVICES=0
 cd "$(dirname "$0")/.."
 
 python3 code/scripts/train_treadmill_agent_jax_reff_pg.py \
-    --config training_configs/reff_pg_exp_gru_initial_prob_offset.json \
+    --config training_configs/reff_pg_exp_gru_initial_prob_offset_belief_cleaned_up.json \
     --n_networks 1
