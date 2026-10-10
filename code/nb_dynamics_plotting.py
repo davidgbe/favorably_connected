@@ -1081,7 +1081,8 @@ def add_separatrix_plane(ax, params, pca, n_pts=60, alpha=0.2, color='steelblue'
 # --- (from cell 603947a4-78ec-4e47-8215-9cd37f44d61f) ---
 def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_trajectories=None,
                                 color_by='time', params=None, pca=None, rx=0, ry=0, rz=0,
-                                input_color_map=None, save_dir=None):
+                                input_color_map=None, save_dir=None, seed=0,
+                                xlim=None, ylim=None, zlim=None):
     """
     Three 3-D PC plots of hidden-state trajectories during patches, shown side by side.
 
@@ -1179,7 +1180,7 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
             continue
 
         if max_trajectories is not None:
-            rng = np.random.default_rng(0)
+            rng = np.random.default_rng(seed)
             idx = rng.choice(len(patch_projs), size=min(max_trajectories, len(patch_projs)), replace=False)
             patch_projs      = [patch_projs[i]      for i in idx]
             patch_colors     = [patch_colors[i]     for i in idx]
@@ -1190,8 +1191,8 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
             for proj, seg_colors in zip(patch_projs, patch_seg_colors):
                 pts  = proj.reshape(-1, 1, 3)
                 segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-                lc   = Line3DCollection(segs, linewidth=1, alpha=1)
-                lc.set_colors(seg_colors)
+                rgba = plt.matplotlib.colors.to_rgba_array(seg_colors)
+                lc   = _depth_alpha_lc3d(segs, rgba, base_elev, base_azim, linewidth=1)
                 ax.add_collection3d(lc)
             norm, cmap = None, None
         else:
@@ -1207,36 +1208,195 @@ def plot_patch_trajectories_3d(traj_data, threshold=0.5, figsize=(5, 4), max_tra
             for proj, cvals in zip(patch_projs, patch_colors):
                 pts  = proj.reshape(-1, 1, 3)
                 segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-                lc   = Line3DCollection(segs, cmap=cmap, norm=norm, linewidth=1, alpha=1)
-                lc.set_array(np.asarray(cvals[:-1]).ravel())
+                rgba = cmap(norm(np.asarray(cvals[:-1]).ravel()))
+                lc   = _depth_alpha_lc3d(segs, rgba, base_elev, base_azim, linewidth=1)
                 ax.add_collection3d(lc)
 
-        if global_lims is not None:
-            ax.set_xlim(*global_lims[0])
-            ax.set_ylim(*global_lims[1])
-            ax.set_zlim(*global_lims[2])
+        _eff_xlim = xlim if xlim is not None else (global_lims[0] if global_lims else None)
+        _eff_ylim = ylim if ylim is not None else (global_lims[1] if global_lims else None)
+        _eff_zlim = zlim if zlim is not None else (global_lims[2] if global_lims else None)
 
+        def _apply_lims():
+            if _eff_xlim: ax.set_xlim(*_eff_xlim)
+            if _eff_ylim: ax.set_ylim(*_eff_ylim)
+            if _eff_zlim: ax.set_zlim(*_eff_zlim)
+
+        _apply_lims()
         _style_3d_ax(ax, norm, cmap, cbar_label, cbar=(input_color_map is None), rotation=R)
-
-        # Re-apply after _style_3d_ax (autoscale_view may have overridden them)
-        if global_lims is not None:
-            ax.set_xlim(*global_lims[0])
-            ax.set_ylim(*global_lims[1])
-            ax.set_zlim(*global_lims[2])
+        _apply_lims()  # re-apply after autoscale_view
 
         if params is not None:
             add_separatrix_plane(ax, params, pca, rotation=R)
 
-        # Re-apply after separatrix plane (surface plot may expand z limits)
-        if global_lims is not None:
-            ax.set_xlim(*global_lims[0])
-            ax.set_ylim(*global_lims[1])
-            ax.set_zlim(*global_lims[2])
+        _apply_lims()  # re-apply after separatrix plane
 
     plt.tight_layout()
     if save_dir is not None:
         os.makedirs(save_dir, exist_ok=True)
         fig.savefig(os.path.join(save_dir, 'patch_trajectories_3d.pdf'), bbox_inches='tight')
+    return fig
+
+
+def plot_patch_trajectories_2d(
+    traj_data,
+    threshold=0.5,
+    figsize=(12, 4),
+    max_trajectories=None,
+    color_by='time',
+    params=None,
+    pca=None,
+    pc_x=0,
+    pc_y=1,
+    input_color_map=None,
+    save_dir=None,
+    seed=0,
+    xlim=None,
+    ylim=None,
+    max_timesteps=None,
+    min_timesteps=None,
+    lw=1.5,
+):
+    """2D version of plot_patch_trajectories_3d projected onto two chosen PCs.
+
+    pc_x / pc_y : 0-indexed PC indices to use as x and y axes (default 0, 1).
+    xlim / ylim : optional (min, max) tuples to override auto-computed axis limits.
+    min_timesteps / max_timesteps: window each patch trajectory to [min_timesteps:max_timesteps].
+    """
+    _steps_per_env = 20000
+    _n_envs = max(1, traj_data['actor_hidden'].shape[0] // _steps_per_env)
+    obs     = traj_data['observations'].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)
+    hidden  = traj_data['actor_hidden'].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)
+    in_patch = traj_data['agent_in_patch'].reshape(_n_envs, _steps_per_env).T
+    periods = extract_patch_starts_and_stops(in_patch)
+
+    if color_by != 'time':
+        raw = traj_data[color_by].reshape(_n_envs, _steps_per_env, -1).transpose(1, 0, 2)
+        color_signal = raw[..., 0]
+        cbar_label = color_by
+    else:
+        color_signal = None
+        cbar_label = 'time in patch'
+
+    if input_color_map is not None:
+        _icm_arrays = np.stack([a for a, _ in input_color_map])
+        _icm_colors = [c for _, c in input_color_map]
+    else:
+        _icm_arrays = _icm_colors = None
+
+    _base_cmap = copy(plt.cm.viridis)
+    obs_dims = [(1, 'obs dim 1 high'), (2, 'obs dim 2 high'), (3, 'obs dim 3 high')]
+
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    # Pre-compute separatrix coefficients in PC space
+    sep_line = None
+    if params is not None and pca is not None:
+        kernel = np.array(params['params']['actor']['kernel'])
+        w      = kernel[:, 0] - kernel[:, 1]
+        bias   = np.array(params['params']['actor']['bias'])
+        b_diff = float(bias[0] - bias[1])
+        w_pc   = pca.components_ @ w          # weights in PC space
+        b_pc   = float(w @ pca.mean_) + b_diff
+        wx, wy = w_pc[pc_x], w_pc[pc_y]
+        sep_line = (wx, wy, b_pc)
+
+    for ax, (dim, title) in zip(axes, obs_dims):
+        ax.set_title(title, fontsize=9)
+
+        patch_projs      = []
+        patch_projs_full = []   # full-patch projections for axis-limit calculation
+        patch_colors     = []
+        patch_seg_colors = []
+
+        for trial, trial_periods in enumerate(periods):
+            for start, end in trial_periods:
+                patch_obs = obs[start:end, trial, dim]
+                if not np.any(patch_obs > threshold):
+                    continue
+                proj_full = pca.transform(hidden[start:end, trial, :])[:, [pc_x, pc_y]]
+                proj = proj_full[min_timesteps:max_timesteps]
+                if len(proj) == 0:
+                    continue
+                win_start = min_timesteps or 0
+                patch_projs.append(proj)
+                patch_projs_full.append(proj_full)
+                n_pts = len(proj)
+                if input_color_map is not None:
+                    full_obs  = obs[start + win_start:start + win_start + n_pts, trial, :]
+                    dists     = np.sum((full_obs[:, None, :] - _icm_arrays[None]) ** 2, axis=-1)
+                    best      = np.argmin(dists, axis=-1)
+                    patch_seg_colors.append([_icm_colors[b] for b in best[:-1]])
+                    patch_colors.append(np.zeros(n_pts))
+                elif color_signal is not None:
+                    patch_colors.append(color_signal[start + win_start:start + win_start + n_pts, trial])
+                else:
+                    patch_colors.append(np.arange(n_pts))
+
+        if not patch_projs:
+            ax.set_visible(False)
+            continue
+
+        if max_trajectories is not None:
+            rng = np.random.default_rng(seed)
+            idx = rng.choice(len(patch_projs),
+                             size=min(max_trajectories, len(patch_projs)), replace=False)
+            patch_projs      = [patch_projs[i]      for i in idx]
+            patch_colors     = [patch_colors[i]     for i in idx]
+            if input_color_map is not None:
+                patch_seg_colors = [patch_seg_colors[i] for i in idx]
+            patch_projs_full = [patch_projs_full[i] for i in idx]
+
+        all_pts = np.concatenate(patch_projs_full, axis=0)  # axis limits from full patch
+        _eff_xlim = xlim if xlim is not None else (all_pts[:, 0].min(), all_pts[:, 0].max())
+        _eff_ylim = ylim if ylim is not None else (all_pts[:, 1].min(), all_pts[:, 1].max())
+
+        if input_color_map is not None:
+            for proj, seg_colors in zip(patch_projs, patch_seg_colors):
+                pts  = proj.reshape(-1, 1, 2)
+                segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+                lc   = LineCollection(segs, linewidths=lw, alpha=0.9)
+                lc.set_colors(seg_colors)
+                ax.add_collection(lc)
+            norm, cmap = None, None
+        else:
+            all_vals = np.concatenate([c.ravel() for c in patch_colors])
+            cmap = _base_cmap
+            norm = Normalize(vmin=np.nanmin(all_vals), vmax=np.nanmax(all_vals))
+            for proj, cvals in zip(patch_projs, patch_colors):
+                pts  = proj.reshape(-1, 1, 2)
+                segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+                lc   = LineCollection(segs, cmap=cmap, norm=norm, linewidths=lw)
+                lc.set_array(np.asarray(cvals[:-1]).ravel())
+                ax.add_collection(lc)
+            if norm is not None:
+                plt.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap),
+                             ax=ax, label=cbar_label, fraction=0.046, pad=0.04)
+
+        ax.set_xlim(*_eff_xlim)
+        ax.set_ylim(*_eff_ylim)
+
+        if sep_line is not None:
+            wx, wy, b_pc = sep_line
+            x_range = np.linspace(*_eff_xlim, 200)
+            if abs(wy) > 1e-10:
+                y_sep = -(wx * x_range + b_pc) / wy
+                ax.plot(x_range, y_sep, 'k--', lw=1, alpha=1)
+
+        # Corner PC axes (matches 3D style)
+        ax.set_axis_off()
+        ox, oy = _eff_xlim[0], _eff_ylim[0]
+        xl = (_eff_xlim[1] - _eff_xlim[0]) * 0.25
+        yl = (_eff_ylim[1] - _eff_ylim[0]) * 0.25
+        _akw = dict(arrowstyle='->', color='k', lw=1.0)
+        ax.annotate('', xy=(ox + xl, oy), xytext=(ox, oy), arrowprops=_akw)
+        ax.annotate('', xy=(ox, oy + yl), xytext=(ox, oy), arrowprops=_akw)
+        ax.text(ox + xl * 1.12, oy, f'PC{pc_x + 1}', ha='left',   va='center', fontsize=14)
+        ax.text(ox, oy + yl * 1.12, f'PC{pc_y + 1}', ha='center', va='bottom', fontsize=14)
+
+    fig.tight_layout()
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        fig.savefig(os.path.join(save_dir, 'patch_trajectories_2d.pdf'), bbox_inches='tight')
     return fig
 
 
@@ -3197,11 +3357,16 @@ def plot_pred_reward_rate_vs_patch_progress(traj_data, n_traj=10, figsize=(4, 3)
 
 
 def plot_patch_progress_trajectories_pc1(traj_data, patch_types=(1, 2), n_traj=10,
-                                          figsize=(4, 3), seed=0):
+                                          figsize=(4, 3), seed=0, proj_dir=None, y_label=None,
+                                          x_var='time', mean_sem=False, combined=False):
     """
     Like plot_patch_progress_trajectories but y-axis is the projection onto the
     first PC of all pre-odor onset states (pre-odor PC1).  All timesteps within
     each patch visit are plotted.
+
+    proj_dir : optional (H,) direction to project onto instead of pre-odor PC1
+               (e.g. the first PC of the fixed points).  Its sign is still flipped
+               to align with patch progress.  y_label overrides the y-axis label.
     """
     _spe = 20000
     _ne  = max(1, traj_data['actor_hidden'].shape[0] // _spe)
@@ -3209,21 +3374,30 @@ def plot_patch_progress_trajectories_pc1(traj_data, patch_types=(1, 2), n_traj=1
 
     obs_arr        = (traj_data['observations']
                       .reshape(_ne, _spe, -1).transpose(1, 0, 2))            # (T, ne, obs)
+    obs_arr        = np.clip(np.round(obs_arr), 0, 1)                         # round each obs to nearest 0/1
     in_patch_arr   = obs_arr[:, :, 0]                                         # (T, ne)
     patch_type_arr = (traj_data['current_patch_num']
                       .reshape(_ne, _spe, -1).transpose(1, 0, 2)[:, :, 0])  # (T, ne)
     hidden_arr     = (traj_data['actor_hidden']
                       .reshape(_ne, _spe, H).transpose(1, 0, 2))             # (T, ne, H)
+    rewards_seen_arr = (np.asarray(traj_data['rewards_seen_in_patch'])
+                        .reshape(_ne, _spe, -1).transpose(1, 0, 2)[:, :, 0]  # (T, ne)
+                        if x_var == 'rewards_seen' else None)
 
     # Pre-odor PC1
     events = find_pre_odor_onset_states(traj_data)
+    print(events['hidden'].shape)
     sub_hidden = events['hidden'][:, 0]
     if len(sub_hidden) < 2:
         print('Insufficient pre-odor states for PCA')
         return None
 
-    ctx_pca = PCA(n_components=1).fit(sub_hidden)
-    v = ctx_pca.components_[0]
+    if proj_dir is None:
+        ctx_pca = PCA(n_components=1).fit(sub_hidden)
+        v = ctx_pca.components_[0]
+    else:
+        v = np.asarray(proj_dir, dtype=float)
+        v = v / (np.linalg.norm(v) + 1e-12)
 
     tte_data_all = collect_pre_odor_time_to_exit(traj_data)
     if len(tte_data_all['time_to_exit']) >= 10:
@@ -3255,42 +3429,81 @@ def plot_patch_progress_trajectories_pc1(traj_data, patch_types=(1, 2), n_traj=1
 
     type_colors = {0: '#7570b3', 1: '#2ca02c', 2: '#d95f02'}
 
-    fig, axes = plt.subplots(1, len(patch_types),
-                             figsize=(figsize[0] * len(patch_types), figsize[1]),
-                             sharey=True, sharex=True)
-    if len(patch_types) == 1:
-        axes = [axes]
+    if combined:
+        fig, _ax = plt.subplots(figsize=figsize)
+        axes = [_ax] * len(patch_types)                  # all patch types on one axes
+    else:
+        fig, axes = plt.subplots(1, len(patch_types),
+                                 figsize=(figsize[0] * len(patch_types), figsize[1]),
+                                 sharey=True, sharex=True)
+        if len(patch_types) == 1:
+            axes = [axes]
 
-    for ax, pt in zip(axes, patch_types):
+    for i, (ax, pt) in enumerate(zip(axes, patch_types)):
         visits = visits_by_type[pt]
         if not visits:
             ax.set_title(f'Patch {pt} (no visits)', fontsize=8)
             continue
 
-        chosen = rng.choice(len(visits), size=min(n_traj, len(visits)), replace=False)
         color  = type_colors.get(pt, 'steelblue')
 
-        for idx in chosen:
-            env_idx, t_start, t_end = visits[idx]
-            h_traj   = hidden_arr[t_start:t_end, env_idx, :]   # (L, H)
-            obs_traj = obs_arr[t_start:t_end, env_idx, :]      # (L, obs)
-            if len(h_traj) < 2:
-                continue
-            in_odor   = np.any(obs_traj[:, 1:4] > 0.5, axis=-1)
-            proj      = h_traj @ v
-            t         = np.arange(len(proj))
-            t_vis, proj_vis = t[~in_odor], proj[~in_odor]
-            ax.plot(t_vis, proj_vis, color=color, alpha=0.6, lw=0.8)
-            ax.scatter(t_vis, proj_vis, color=color, alpha=0.4, s=8, linewidths=0)
-            if len(t_vis) > 0:
-                ax.scatter(t_vis[0],  proj_vis[0],  marker='*', color='darkgreen', s=60, zorder=5)
-                ax.scatter(t_vis[-1], proj_vis[-1], marker='*', color='darkred',   s=60, zorder=5)
+        if mean_sem:
+            # aggregate ALL visits: mean +/- STD of the projection, binned by the integer x-value
+            xs_all, proj_all = [], []
+            for env_idx, t_start, t_end in visits:
+                t_start, t_end = t_start + 1, t_end - 1          # start 1 later, end 1 earlier
+                h_traj = hidden_arr[t_start:t_end, env_idx, :]
+                if len(h_traj) < 2:
+                    continue
+                proj = h_traj @ v
+                x = (rewards_seen_arr[t_start:t_end, env_idx] if x_var == 'rewards_seen'
+                     else np.arange(len(proj)))
+                xs_all.append(np.asarray(x)); proj_all.append(proj)
+            if xs_all:
+                xs_all = np.concatenate(xs_all); proj_all = np.concatenate(proj_all)
+                xr   = np.round(xs_all).astype(int)
+                uniq = np.unique(xr)
+                m    = np.array([proj_all[xr == u].mean() for u in uniq])
+                n    = np.array([int((xr == u).sum()) for u in uniq])
+                sd   = np.array([proj_all[xr == u].std() for u in uniq])   # standard deviation
+                keep = n >= 5                                    # drop sparsely-sampled x bins
+                ax.plot(uniq[keep], m[keep], color=color, lw=1.5, label=f'Patch type {pt}')
+                ax.fill_between(uniq[keep], (m - sd)[keep], (m + sd)[keep],
+                                color=color, alpha=0.3, lw=0)
+        else:
+            chosen = rng.choice(len(visits), size=min(n_traj, len(visits)), replace=False)
+            for idx in chosen:
+                env_idx, t_start, t_end = visits[idx]
+                t_start, t_end = t_start + 1, t_end - 1          # start 1 step later, end 1 step earlier
+                h_traj = hidden_arr[t_start:t_end, env_idx, :]   # (L, H)  every state entry -> exit
+                if len(h_traj) < 2:
+                    continue
+                proj = h_traj @ v
+                if x_var == 'rewards_seen':
+                    t = rewards_seen_arr[t_start:t_end, env_idx]   # rewards seen at each state
+                else:
+                    t = np.arange(len(proj))                        # time within patch
+                ax.plot(t, proj, color=color, alpha=1, lw=0.5)
 
-        ax.set_xlabel('Time within patch (steps)', fontsize=8)
-        ax.set_title(f'Patch type {pt}', fontsize=8)
-        if pt == patch_types[0]:
-            ax.set_ylabel('Pre-odor PC1 projection', fontsize=8)
+        if not combined:
+            if i == 0:
+                ax.set_ylabel(y_label or 'Pre-odor PC1 projection', fontsize=8)
+                ax.set_xlabel('Rewards seen in patch' if x_var == 'rewards_seen'
+                          else 'Time within patch (steps)', fontsize=8)
+            ax.set_title(f'Patch type {pt}', fontsize=8)
+            format_plot(ax)
+
+    if combined:
+        ax = axes[0]
+        ax.set_ylabel(y_label or 'Pre-odor PC1 projection', fontsize=8)
+        ax.set_xlabel('Rewards seen in patch' if x_var == 'rewards_seen'
+                      else 'Time within patch (steps)', fontsize=8)
+        ax.set_title('Patch types ' + ', '.join(str(p) for p in patch_types), fontsize=8)
         format_plot(ax)
+        handles = [plt.Line2D([0], [0], color=type_colors.get(p, 'steelblue'), lw=2,
+                              label=f'Patch type {p}')
+                   for p in patch_types if visits_by_type.get(p)]
+        ax.legend(handles=handles, fontsize=7, frameon=False)
 
     fig.tight_layout()
     return fig
@@ -4470,6 +4683,12 @@ def plot_patch_segments_with_fixed_points(
     traj_cmap=None,
     plot_current_segment=True,
     plot_pcs_4_6=False,
+    n_trajectories=1,
+    scale=1.0,
+    fp_marker_size=80,
+    fp_color=None,
+    lw=1.0,
+    unique_fp_tol=0.1,
 ):
     """Plot a single patch visit in 3D PC space, split by constant-input segments.
 
@@ -4543,6 +4762,8 @@ def plot_patch_segments_with_fixed_points(
     patch_inputs = inputs[pre_start:p_stop]
     patch_hidden = hidden[pre_start:p_stop]
     T_patch = p_stop - pre_start
+    rewards_patch     = traj_data['rewards'].reshape(n_envs, N_STEPS)[trial_idx][pre_start:p_stop]
+    cum_rewards_patch = np.cumsum(rewards_patch).astype(float)   # (T_patch,)
 
     # Split patch into contiguous constant-input segments
     changes   = np.any(patch_inputs[1:] != patch_inputs[:-1], axis=1)
@@ -4553,6 +4774,17 @@ def plot_patch_segments_with_fixed_points(
                 ]
 
     n_input_dims = patch_inputs.shape[1]
+
+    # Collect background trajectories from other patches of the same type
+    bg_patch_hiddens = []
+    for pi in range(len(starts)):
+        if pi == patch_idx:
+            continue
+        if len(bg_patch_hiddens) >= n_trajectories - 1:
+            break
+        ps, pe = starts[pi], stops[pi]
+        pre_s = max(0, ps - 1)
+        bg_patch_hiddens.append(hidden[pre_s:pe])
 
     print(f'Trial {trial_idx}, patch {patch_idx}  '
           f'(global steps {pre_start}–{p_stop - 1}, length {T_patch})  '
@@ -4578,20 +4810,28 @@ def plot_patch_segments_with_fixed_points(
         unique_inputs = {_uniqueness_key(patch_inputs[s]) for s, _ in segments}
         seen_inputs   = set()
 
-    remaining_targets = None
+    remaining_targets   = None
+    has_wildcard_target = False
     if target_inputs is not None:
-        remaining_targets = [_rounded_key(t) for t in target_inputs]
-        seen_target_keys  = set()
+        has_wildcard_target = any(t is None for t in target_inputs)
+        remaining_targets   = [_rounded_key(t) for t in target_inputs if t is not None]
+        seen_target_keys    = set()
 
     for seg_idx, (s, e) in enumerate(segments):
         seg_hidden = patch_hidden[s:e+1]
         raw_input  = patch_inputs[s]
         rounded_key = _rounded_key(raw_input)
 
-        if remaining_targets is not None:
-            if rounded_key not in remaining_targets or rounded_key in seen_target_keys:
+        skip_fp_search = False
+        if target_inputs is not None:
+            matched_specific = (bool(remaining_targets) and
+                                rounded_key in remaining_targets and
+                                rounded_key not in seen_target_keys)
+            matched_wildcard = has_wildcard_target and rounded_key not in seen_target_keys
+            if not (matched_specific or matched_wildcard):
                 continue
             seen_target_keys.add(rounded_key)
+            skip_fp_search = not matched_specific
 
         if stop_after_unique_inputs:
             key_u = _uniqueness_key(raw_input)
@@ -4616,7 +4856,9 @@ def plot_patch_segments_with_fixed_points(
         input_vec     = raw_input
 
         # Find (or load) fixed points
-        if preloaded_fps is not None:
+        if skip_fp_search:
+            unique_fps = jnp.zeros((0, traj_data['actor_hidden'].shape[1]))
+        elif preloaded_fps is not None:
             unique_fps = preloaded_fps
         else:
             key     = jax.random.PRNGKey(42)
@@ -4628,7 +4870,7 @@ def plot_patch_segments_with_fixed_points(
                 h_inits=h_inits, max_steps=60000, learning_rate=0.001,
                 tolerance=fp_tol, verbose=False,
             )
-            unique_fps = filter_unique_fixed_points(fps, converged)
+            unique_fps = filter_unique_fixed_points(fps, converged, unique_fp_tol)
         n_fps = len(unique_fps)
 
         # Compute q value (movement speed squared) and participation ratio for fixed points
@@ -4640,16 +4882,17 @@ def plot_patch_segments_with_fixed_points(
                 fp_pr = participation_ratio(np.array(unique_fps))
 
         # --- Figure: obs | 3D | cbar_time | 3D | cbar_eig | sep_dist ---
-        fig = plt.figure(figsize=figsize)
-        gs  = fig.add_gridspec(6, 1,
-                               height_ratios=[1, 5, 0.15, 5, 0.15, 1],
-                               hspace=0.4)
-        ax_obs     = fig.add_subplot(gs[0])
-        ax_3d      = fig.add_subplot(gs[1], projection='3d')
-        ax_cb_time = fig.add_subplot(gs[2])
-        ax_3d2     = fig.add_subplot(gs[3], projection='3d')
-        ax_cb_eig  = fig.add_subplot(gs[4])
-        ax_sep     = fig.add_subplot(gs[5])
+        fig = plt.figure(figsize=(figsize[0] * scale, figsize[1] * scale))
+        gs  = fig.add_gridspec(4, 2,
+                               height_ratios=[1, 5, 5, 1],
+                               width_ratios=[1, 0.05],
+                               hspace=0.4, wspace=0.05)
+        ax_obs     = fig.add_subplot(gs[0, :])
+        ax_3d      = fig.add_subplot(gs[1, 0], projection='3d')
+        ax_cb_time = fig.add_subplot(gs[1, 1])
+        ax_3d2     = fig.add_subplot(gs[2, 0], projection='3d')
+        ax_cb_eig  = fig.add_subplot(gs[2, 1])
+        ax_sep     = fig.add_subplot(gs[3, :])
 
         # Top panel: full patch input matrix, channels x time
         im = ax_obs.imshow(
@@ -4690,15 +4933,34 @@ def plot_patch_segments_with_fixed_points(
         T_seg      = len(proj)
         norm       = Normalize(vmin=0, vmax=T_seg - 1)
 
-        # Full patch trajectory coloured by time in patch
-        full_pts   = patch_proj.reshape(-1, 1, 3)
-        full_segs  = np.concatenate([full_pts[:-1], full_pts[1:]], axis=1)
-        t_full     = np.arange(len(patch_proj) - 1, dtype=float)
-        full_norm  = Normalize(vmin=0, vmax=len(patch_proj) - 1)
-        full_colors = cmap_traj(full_norm(t_full))
+        # Background trajectories (dimmed, behind the main trajectory)
+        for bg_h in bg_patch_hiddens:
+            bg_proj  = pca.transform(bg_h)[:, :3]
+            bg_pts   = bg_proj.reshape(-1, 1, 3)
+            bg_segs  = np.concatenate([bg_pts[:-1], bg_pts[1:]], axis=1)
+            bg_t     = np.arange(len(bg_proj) - 1, dtype=float)
+            bg_norm  = Normalize(vmin=0, vmax=max(len(bg_proj) - 1, 1))
+            bg_col   = cmap_traj(bg_norm(bg_t)).copy()
+            bg_col[:, 3] *= 0.3
+            for ax_bg, el_bg, az_bg in [(ax_3d, elev, azim), (ax_3d2, elev2, azim2)]:
+                ax_bg.add_collection3d(
+                    _depth_alpha_lc3d(bg_segs, bg_col, el_bg, az_bg,
+                                      linewidth=lw * 0.7, zorder=0))
+
+        # Full patch trajectory coloured by rewards seen in patch
+        full_pts          = patch_proj.reshape(-1, 1, 3)
+        full_segs         = np.concatenate([full_pts[:-1], full_pts[1:]], axis=1)
+        reward_color_vals = cum_rewards_patch[:-1]
+        full_norm         = Normalize(vmin=0, vmax=max(float(cum_rewards_patch.max()), 1.0))
+        cmap_rewards      = cmap_traj
+        full_colors       = cmap_rewards(full_norm(reward_color_vals))
         lc_full = _depth_alpha_lc3d(full_segs, full_colors, elev, azim,
-                                     linewidth=1, zorder=1)
+                                     linewidth=lw, zorder=1)
         ax_3d.add_collection3d(lc_full)
+        ax_3d.scatter(*patch_proj[0],  s=40, marker='o', facecolors='none',
+                      edgecolors='k', linewidths=1.0, zorder=4)
+        ax_3d.scatter(*patch_proj[-1], s=40, marker='o', facecolors='none',
+                      edgecolors='blue', linewidths=1.0, zorder=4)
 
         # Current segment coloured by side of separatrix
         kernel  = np.array(params['params']['actor']['kernel'])   # (H, 2)
@@ -4716,7 +4978,7 @@ def plot_patch_segments_with_fixed_points(
         if plot_current_segment:
             seg_colors = cmap_sep(sep_norm(scores[1:]))
             lc = _depth_alpha_lc3d(seg_segs, seg_colors, elev, azim,
-                                    alpha_min=0.3, linewidth=2, zorder=2)
+                                    alpha_min=0.3, linewidth=lw * 2, zorder=2)
             ax_3d.add_collection3d(lc)
 
             ax_3d.scatter(*proj[0],  s=120, color='green', marker='*', edgecolors='none', zorder=5)
@@ -4725,9 +4987,13 @@ def plot_patch_segments_with_fixed_points(
         fp_eigenvalues = None
         if n_fps > 0:
             fp_proj = pca.transform(np.array(unique_fps))[:, :3]
-            if preloaded_fps is not None:
+            if fp_color is not None:
                 ax_3d.scatter(fp_proj[:, 0], fp_proj[:, 1], fp_proj[:, 2],
-                              s=80, marker='o', color='grey',
+                              s=fp_marker_size, marker='o', color=fp_color,
+                              edgecolors='k', linewidths=0.5, zorder=6)
+            elif preloaded_fps is not None:
+                ax_3d.scatter(fp_proj[:, 0], fp_proj[:, 1], fp_proj[:, 2],
+                              s=fp_marker_size, marker='o', color='grey',
                               edgecolors='k', linewidths=0.5, zorder=6)
             else:
                 fp_eigenvalues = analyze_stability_batch(unique_fps, input_vec, params, network)
@@ -4740,7 +5006,7 @@ def plot_patch_segments_with_fixed_points(
                 cmap_fp = LinearSegmentedColormap.from_list(
                     'eig_div', ['#2166ac', '#762a83', '#b2182b'])  # blue → purple → red, no white center
                 ax_3d.scatter(fp_proj[:, 0], fp_proj[:, 1], fp_proj[:, 2],
-                              s=80, marker='o', c=max_eigs, cmap=cmap_fp,
+                              s=fp_marker_size, marker='o', c=max_eigs, cmap=cmap_fp,
                               norm=fp_norm, edgecolors='k', linewidths=0.5, zorder=6)
         obs_str = ', '.join(f'{v:.2f}' for v in obs_vec)
         ax_3d.set_title(
@@ -4753,58 +5019,71 @@ def plot_patch_segments_with_fixed_points(
         ax_3d.view_init(elev=elev, azim=azim)
         add_separatrix_plane(ax_3d, params, pca)
 
-        # Time colorbar in its own axis (narrowed to 30% width, centered)
-        sm_time = plt.cm.ScalarMappable(cmap=cmap_traj, norm=full_norm)
+        # Rewards colorbar (vertical, next to first 3D view, 1/3 height)
+        sm_time = plt.cm.ScalarMappable(cmap=cmap_rewards, norm=full_norm)
         sm_time.set_array([])
-        pos_t = ax_cb_time.get_position()
-        shrink_t = 0.3
-        new_w_t = pos_t.width * shrink_t
-        ax_cb_time.set_position([pos_t.x0 + (pos_t.width - new_w_t) / 2, pos_t.y0,
-                                 new_w_t, pos_t.height])
-        cb_time = plt.colorbar(sm_time, cax=ax_cb_time, orientation='horizontal',
-                               label='Time in patch')
+        _pt = ax_cb_time.get_position()
+        _nh = _pt.height / 3
+        ax_cb_time.set_position([_pt.x0, _pt.y0 + _pt.height / 2 - _nh / 2, _pt.width, _nh])
+        cb_time = plt.colorbar(sm_time, cax=ax_cb_time, orientation='vertical',
+                               label='Rewards seen in patch')
         cb_time.outline.set_visible(False)
-        cb_time.ax.xaxis.label.set_size(9)
+        cb_time.ax.yaxis.label.set_size(9)
         ax_cb_time.tick_params(labelsize=9)
 
         # Second 3D view
-        full_colors2 = cmap_traj(full_norm(t_full))
+        full_colors2 = cmap_rewards(full_norm(reward_color_vals))
         lc_full2 = _depth_alpha_lc3d(full_segs, full_colors2, elev2, azim2,
-                                      linewidth=1, zorder=1)
+                                      linewidth=lw, zorder=1)
         ax_3d2.add_collection3d(lc_full2)
+        ax_3d2.scatter(*patch_proj[0],  s=40, marker='o', facecolors='none',
+                       edgecolors='k', linewidths=1.0, zorder=4)
+        ax_3d2.scatter(*patch_proj[-1], s=40, marker='o', facecolors='none',
+                       edgecolors='#2166ac', linewidths=1.0, zorder=4)
         if plot_current_segment:
             seg_colors2 = cmap_sep(sep_norm(scores[1:]))
             lc2 = _depth_alpha_lc3d(seg_segs, seg_colors2, elev2, azim2,
-                                     alpha_min=0.3, linewidth=2, zorder=2)
+                                     alpha_min=0.3, linewidth=lw * 2, zorder=2)
             ax_3d2.add_collection3d(lc2)
             ax_3d2.scatter(*proj[0],  s=120, color='green', marker='*', edgecolors='none', zorder=5)
             ax_3d2.scatter(*proj[-1], s=120, color='red',   marker='*', edgecolors='none', zorder=5)
         if n_fps > 0:
-            if preloaded_fps is not None:
+            if fp_color is not None:
                 ax_3d2.scatter(fp_proj[:, 0], fp_proj[:, 1], fp_proj[:, 2],
-                               s=80, marker='o', color='grey',
+                               s=fp_marker_size, marker='o', color=fp_color,
+                               edgecolors='k', linewidths=0.5, zorder=6)
+            elif preloaded_fps is not None:
+                ax_3d2.scatter(fp_proj[:, 0], fp_proj[:, 1], fp_proj[:, 2],
+                               s=fp_marker_size, marker='o', color='grey',
                                edgecolors='k', linewidths=0.5, zorder=6)
             else:
                 ax_3d2.scatter(fp_proj[:, 0], fp_proj[:, 1], fp_proj[:, 2],
-                               s=80, marker='o', c=max_eigs, cmap=cmap_fp,
+                               s=fp_marker_size, marker='o', c=max_eigs, cmap=cmap_fp,
                                norm=fp_norm, edgecolors='k', linewidths=0.5, zorder=6)
         _style_3d_ax(ax_3d2, sep_norm, cmap_sep, 'separatrix side', cbar=False)
         ax_3d2.view_init(elev=elev2, azim=azim2)
         add_separatrix_plane(ax_3d2, params, pca)
 
-        # Eigenvalue colorbar in its own axis (narrowed to 30% width, centered)
+        # Share limits between the two 3D views so geometry is comparable
+        for get_lim, set_lim in [('get_xlim3d', 'set_xlim3d'),
+                                  ('get_ylim3d', 'set_ylim3d'),
+                                  ('get_zlim3d', 'set_zlim3d')]:
+            lo = min(getattr(ax_3d, get_lim)()[0], getattr(ax_3d2, get_lim)()[0])
+            hi = max(getattr(ax_3d, get_lim)()[1], getattr(ax_3d2, get_lim)()[1])
+            getattr(ax_3d,  set_lim)(lo, hi)
+            getattr(ax_3d2, set_lim)(lo, hi)
+
+        # Eigenvalue colorbar (vertical, next to second 3D view, 1/3 height)
         if fp_eigenvalues is not None:
             sm_fp = plt.cm.ScalarMappable(cmap=cmap_fp, norm=fp_norm)
             sm_fp.set_array([])
-            pos_e = ax_cb_eig.get_position()
-            shrink_e = 0.3
-            new_w_e = pos_e.width * shrink_e
-            ax_cb_eig.set_position([pos_e.x0 + (pos_e.width - new_w_e) / 2, pos_e.y0,
-                                    new_w_e, pos_e.height])
-            cb_eig = plt.colorbar(sm_fp, cax=ax_cb_eig, orientation='horizontal',
+            _pe = ax_cb_eig.get_position()
+            _nh = _pe.height / 3
+            ax_cb_eig.set_position([_pe.x0, _pe.y0 + _pe.height / 2 - _nh / 2, _pe.width, _nh])
+            cb_eig = plt.colorbar(sm_fp, cax=ax_cb_eig, orientation='vertical',
                                   label='max |eig|')
             cb_eig.outline.set_visible(False)
-            cb_eig.ax.xaxis.label.set_size(9)
+            cb_eig.ax.yaxis.label.set_size(9)
             ax_cb_eig.tick_params(labelsize=9)
         else:
             ax_cb_eig.set_visible(False)
@@ -4825,8 +5104,10 @@ def plot_patch_segments_with_fixed_points(
 
         if save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
-            fname = f'trial{trial_idx}_patch{patch_idx}_seg{seg_idx}.pdf'
-            fig.savefig(os.path.join(save_dir, fname), bbox_inches='tight')
+            stem = f'trial{trial_idx}_patch{patch_idx}_seg{seg_idx}'
+            for _ext, _dpi in (('pdf', None), ('png', 150), ('svg', None)):
+                fig.savefig(os.path.join(save_dir, f'{stem}.{_ext}'),
+                            bbox_inches='tight', **(dict(dpi=_dpi) if _dpi else {}))
 
         plt.show()
 
@@ -4839,48 +5120,54 @@ def plot_patch_segments_with_fixed_points(
             full_segs_hi = np.concatenate([full_pts_hi[:-1], full_pts_hi[1:]], axis=1)
             fps_hi = pca.transform(np.array(unique_fps))[:, hi] if n_fps > 0 else None
 
-            fig_hi = plt.figure(figsize=(figsize[0], 0.55 * figsize[0]))
+            fig_hi = plt.figure(figsize=(figsize[0] * scale, 0.55 * figsize[0] * scale))
             gs_hi  = fig_hi.add_gridspec(1, 2, wspace=0.1)
             for k, (el, az) in enumerate([(elev, azim), (elev2, azim2)]):
                 axk = fig_hi.add_subplot(gs_hi[0, k], projection='3d')
                 axk.add_collection3d(_depth_alpha_lc3d(
                     full_segs_hi, cmap_traj(full_norm(t_full)), el, az,
-                    linewidth=1, zorder=1))
+                    linewidth=lw, zorder=1))
                 if plot_current_segment:
                     seg_pts_hi  = proj_hi.reshape(-1, 1, 3)
                     seg_segs_hi = np.concatenate([seg_pts_hi[:-1], seg_pts_hi[1:]], axis=1)
                     axk.add_collection3d(_depth_alpha_lc3d(
                         seg_segs_hi, cmap_sep(sep_norm(scores[1:])), el, az,
-                        alpha_min=0.3, linewidth=2, zorder=2))
+                        alpha_min=0.3, linewidth=lw * 2, zorder=2))
                     axk.scatter(*proj_hi[0],  s=120, color='green', marker='*',
                                 edgecolors='none', zorder=5)
                     axk.scatter(*proj_hi[-1], s=120, color='red', marker='*',
                                 edgecolors='none', zorder=5)
                 if n_fps > 0:
-                    if preloaded_fps is not None:
+                    if fp_color is not None:
                         axk.scatter(fps_hi[:, 0], fps_hi[:, 1], fps_hi[:, 2],
-                                    s=80, marker='o', color='grey',
+                                    s=fp_marker_size, marker='o', color=fp_color,
+                                    edgecolors='k', linewidths=0.5, zorder=6)
+                    elif preloaded_fps is not None:
+                        axk.scatter(fps_hi[:, 0], fps_hi[:, 1], fps_hi[:, 2],
+                                    s=fp_marker_size, marker='o', color='grey',
                                     edgecolors='k', linewidths=0.5, zorder=6)
                     else:
                         axk.scatter(fps_hi[:, 0], fps_hi[:, 1], fps_hi[:, 2],
-                                    s=80, marker='o', c=max_eigs, cmap=cmap_fp,
+                                    s=fp_marker_size, marker='o', c=max_eigs, cmap=cmap_fp,
                                     norm=fp_norm, edgecolors='k', linewidths=0.5, zorder=6)
                 _style_3d_ax(axk, sep_norm, cmap_sep, 'separatrix side', cbar=False)
                 axk.view_init(elev=el, azim=az)
                 axk.set_xlabel('PC4'); axk.set_ylabel('PC5'); axk.set_zlabel('PC6')
                 axk.set_title(f'PCs 4-6 (view {k + 1})', fontsize=8)
             if save_dir is not None:
-                fig_hi.savefig(os.path.join(
-                    save_dir,
-                    f'trial{trial_idx}_patch{patch_idx}_seg{seg_idx}_pc456.pdf'),
-                    bbox_inches='tight')
+                stem_hi = f'trial{trial_idx}_patch{patch_idx}_seg{seg_idx}_pc456'
+                for _ext, _dpi in (('pdf', None), ('png', 150), ('svg', None)):
+                    fig_hi.savefig(os.path.join(save_dir, f'{stem_hi}.{_ext}'),
+                                   bbox_inches='tight', **(dict(dpi=_dpi) if _dpi else {}))
             plt.show()
 
         if fp_eigenvalues is not None:
             plot_eigenspectra_grid(fp_eigenvalues, n_plots=min(n_fps, 9))
             if save_dir is not None:
-                fname_spec = f'trial{trial_idx}_patch{patch_idx}_seg{seg_idx}_spectra.pdf'
-                plt.savefig(os.path.join(save_dir, fname_spec), bbox_inches='tight')
+                stem_spec = f'trial{trial_idx}_patch{patch_idx}_seg{seg_idx}_spectra'
+                for _ext, _dpi in (('pdf', None), ('png', 150), ('svg', None)):
+                    plt.savefig(os.path.join(save_dir, f'{stem_spec}.{_ext}'),
+                                bbox_inches='tight', **(dict(dpi=_dpi) if _dpi else {}))
             plt.show()
 
         if remaining_targets is not None and seen_target_keys >= set(remaining_targets):
@@ -5135,7 +5422,7 @@ def plot_patch_segments_forward_runs(
             all_proj_hi = pca.transform(
                 trajs.reshape(-1, trajs.shape[-1]))[:, [3, 4, 5]].reshape(
                     n_forward_steps, trajs.shape[1], 3)
-            fig_hi = plt.figure(figsize=(figsize[0], 0.55 * figsize[0]))
+            fig_hi = plt.figure(figsize=(figsize[0] * scale, 0.55 * figsize[0] * scale))
             gs_hi  = fig_hi.add_gridspec(1, 2, wspace=0.1)
             for k, (el, az) in enumerate([(elev, azim), (elev2, azim2)]):
                 axk = fig_hi.add_subplot(gs_hi[0, k], projection='3d')

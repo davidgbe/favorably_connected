@@ -246,6 +246,82 @@ def plot_session(data_path, session_idx, xlim=None, max_reward_param=30,
         fig.savefig(os.path.join(save_dir, 'behavioral_stops_stats_reward_counts.png'))
 
 
+def plot_fraction_attempted_violin(data_path, max_reward_sites=8, use_fixed_colors=True,
+                                   min_obs=5, n_bootstrap=2000, rng_seed=0,
+                                   optimal_stops=None, figsize=None,
+                                   save_dir=None, save_name='fraction_leaving_violin'):
+    """
+    Violin plots of P(stop | n_total_rewards_in_patch) per patch type.
+
+    For each (patch_type, n) bin, bootstrap-resamples the individual binary stop
+    observations to get a distribution of P(stop|n), then draws a violin.
+
+    data_path : trajectory pkl file (e.g. traj_001900.pkl).
+    min_obs   : minimum number of individual observations required to draw a violin.
+    """
+    b_data_raw = load_trajectory_data(data_path)
+    b_data = parse_behavioral_data(b_data_raw[0])
+    ss = get_session_summaries([b_data], max_reward_sites=max_reward_sites)[0]
+
+    import pandas as pd
+    df = pd.DataFrame(ss['all_odor_site_data'])
+
+    patch_types = sorted(df['patch_type'].unique())
+    n_types = len(patch_types)
+    labels = ['Unrewarded', 'Low\nreward', 'High\nreward']
+
+    rng = np.random.default_rng(rng_seed)
+
+    if figsize is None:
+        scale = 1
+        figsize = (3 * scale, 3 * scale)
+
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+
+    # Total rewards collected per patch visit = max rewards_seen_in_patch within each patch
+    exit_rewards = (df.groupby(['patch_type', 'patch_number'])['rewards_seen_in_patch']
+                      .max().reset_index())
+
+    for ki, pt in enumerate(patch_types):
+        c   = odor_colors[ki] if use_fixed_colors else f'C{ki}'
+        lbl = labels[ki] if ki < len(labels) else f'Type {ki}'
+        vals = exit_rewards.loc[exit_rewards['patch_type'] == pt, 'rewards_seen_in_patch'].values
+
+        if len(vals) > 1:
+            parts = ax.violinplot([vals], positions=[ki],
+                                  showmedians=True, showextrema=True)
+            for pc in parts['bodies']:
+                pc.set_facecolor(c)
+                pc.set_alpha(0.6)
+                pc.set_edgecolor(c)
+            for key in ('cmedians', 'cmins', 'cmaxes', 'cbars'):
+                if key in parts:
+                    parts[key].set_color(c)
+                    parts[key].set_linewidth(1.5)
+
+    if optimal_stops is not None:
+        for ki in range(n_types):
+            c = odor_colors[ki] if use_fixed_colors else f'C{ki}'
+            ax.hlines(optimal_stops[ki], ki - 0.4, ki + 0.4,
+                      colors='black', linestyles='--', linewidth=2)
+        ax.plot([], [], color='black', linestyle='--', linewidth=2, label='Optimal stops')
+        ax.legend(frameon=False)
+
+    ax.set_xticks(range(n_types))
+    ax.set_xticklabels([labels[ki] if ki < len(labels) else f'Type {ki}'
+                        for ki in range(n_types)], fontsize=10)
+    ax.set_ylabel('Rewards at exit')
+    format_plot(ax, axislabelsize=13, ticklabelsize=12)
+    fig.tight_layout()
+
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
+        fig.savefig(os.path.join(save_dir, f'{save_name}.svg'))
+        fig.savefig(os.path.join(save_dir, f'{save_name}.png'))
+
+    return fig, ax
+
+
 def load_odor_site_df(load_path, nn_num=0, lim=None, brief=False):
     all_session_data = get_all_session_summaries_pkl(load_path, lim=lim, brief=brief)
     odor_site_dfs = []
@@ -1014,21 +1090,26 @@ def plot_multi_df_accuracy_heatmap(odor_site_dfs, predictors, df_labels=None, fi
 
 
 def plot_leave_probabilities(odor_site_dfs, predictors, dataset_labels=None,
-                             x_labels=None, cmap=None):
+                             x_labels=None, cmap=None, cmap_values=None,
+                             colorbar_label='Dataset', save_dir=None, figsize=(3, 2)):
     """Leave (stop) probability vs. each predictor for multiple datasets.
 
-    x_labels : optional list of x-axis label strings, one per predictor.
-                Falls back to the predictor name (underscores replaced) if None.
-    cmap     : optional matplotlib colormap (name or Colormap). If given, each
-                dataframe is colored by its position in odor_site_dfs (first ->
-                low end, last -> high end of the colormap) and a colorbar is
-                rendered on each plot. If None, matplotlib's default color cycle
-                is used.
+    x_labels       : optional list of x-axis label strings, one per predictor.
+                     Falls back to the predictor name (underscores replaced) if None.
+    cmap           : optional matplotlib colormap (name or Colormap). If given, colors
+                     are drawn from the colormap and a colorbar is rendered on each plot.
+                     If None, matplotlib's default color cycle is used.
+    cmap_values    : optional list of floats in [0, 1], one per dataframe, specifying
+                     the exact position in the colormap to use for each curve. If None
+                     and cmap is set, curves are spaced evenly by index.
+    colorbar_label : label for the colorbar (default: 'Dataset').
+    save_dir       : if given, each figure is saved as an SVG in this directory,
+                     named 'leave_prob_<predictor>.svg'.
     """
+    import os
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import Normalize
 
-    scale = 0.5
     if dataset_labels is None:
         dataset_labels = [f'Dataset {i+1}' for i in range(len(odor_site_dfs))]
     if x_labels is None:
@@ -1037,30 +1118,37 @@ def plot_leave_probabilities(odor_site_dfs, predictors, dataset_labels=None,
     n_dfs = len(odor_site_dfs)
     if cmap is not None:
         cmap_obj = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
-        norm = Normalize(vmin=0, vmax=max(n_dfs - 1, 1))
-        colors = [cmap_obj(norm(i)) for i in range(n_dfs)]
+        norm = Normalize(vmin=0, vmax=1)
+        if cmap_values is not None:
+            colors = [cmap_obj(v) for v in cmap_values]
+        else:
+            vals = [i / max(n_dfs - 1, 1) for i in range(n_dfs)]
+            colors = [cmap_obj(v) for v in vals]
     else:
         colors = [None] * n_dfs
 
     for predictor, x_label in zip(predictors, x_labels):
-        fig, ax = plt.subplots(1, 1, figsize=(scale * 9, scale * 4), constrained_layout=True)
+        fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
         for df, label, color in zip(odor_site_dfs, dataset_labels, colors):
             agg  = df.groupby(predictor)['stopped'].agg(['sum', 'count'])
             k, n = agg['sum'].values, agg['count'].values
             p    = k / n
             ci   = clopper_pearson(k, n)
-            yerr = np.array([p - ci[0], ci[1] - p])
             x    = agg.index.values
-            ax.errorbar(x, p, yerr=yerr, label=label, color=color,
-                        fmt='o-', ms=3, lw=0.8, elinewidth=0.8, capsize=2)
+            line, = ax.plot(x, p, 'o-', ms=3, lw=0.8, label=label, color=color)
+            c = line.get_color()
+            ax.fill_between(x, ci[0], ci[1], alpha=0.2, color=c)
         ax.set_ylabel('Stay probability', fontsize=11)
         ax.set_xlabel(x_label, fontsize=11)
         format_plot(ax)
         if cmap is not None:
             sm = ScalarMappable(cmap=cmap_obj, norm=norm)
             sm.set_array([])
-            cb = fig.colorbar(sm, ax=ax, label='Dataset')
+            cb = fig.colorbar(sm, ax=ax, label=colorbar_label)
             cb.outline.set_visible(False)
+        if save_dir is not None:
+            os.makedirs(save_dir, exist_ok=True)
+            fig.savefig(os.path.join(save_dir, f'leave_prob_{predictor}.svg'), format='svg')
     plt.show()
 
 

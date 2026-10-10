@@ -49,11 +49,15 @@ export CUDA_VISIBLE_DEVICES=1
 # python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
 #   --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen_epoch_1000.json
 
-python3 code/scripts/train_treadmill_agent_jax_curriculum_train_traj.py \
-  --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen_epoch_0250.json
+# python3 code/scripts/train_treadmill_agent_jax_curriculum_train_traj.py \
+#   --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen_epoch_0250.json
 
-python3 code/scripts/train_treadmill_agent_jax_curriculum_train_traj.py \
-  --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen.json
+# python3 code/scripts/train_treadmill_agent_jax_curriculum_train_traj.py \
+#   --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen.json
 
-python3 code/scripts/train_treadmill_agent_jax_curriculum_train_traj.py \
-  --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen_epoch_0250_frozen.json
+# python3 code/scripts/train_treadmill_agent_jax_curriculum_train_traj.py \
+#   --config training_configs/fixed_exp_gru_initial_prob_offset_intersite_lengthen_epoch_0250_frozen.json
+
+python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
+  --config training_configs/structure_evo_exp_gru_initial_prob_offset_full.json \
+  --n_networks 5

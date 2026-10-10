@@ -1,0 +1,56 @@
+[project]
+name = "favorably-connected"
+version = "0.1.0"
+requires-python = "==3.11.*"
+dependencies = [
+    # JAX ecosystem
+    "jax[cuda12]",
+    "flax",
+    "optax",
+    "orbax-checkpoint",
+    "chex",
+    "dm-tree",
+    "ml-dtypes",
+    "tensorstore",
+    "treescope",
+    "absl-py",
+    # PyTorch
+    "torch",
+    "triton",
+    # RL / simulation
+    "gymnasium==0.28.1",
+    "optuna",
+    "cma",
+    # Scientific stack
+    "numpy",
+    "scipy",
+    "pandas",
+    "matplotlib",
+    "seaborn",
+    "scikit-learn",
+    "networkx",
+    "cloudpickle",
+    "blosc",
+    "tqdm",
+    "protobuf",
+    # Jupyter
+    "jupyterlab",
+    "ipykernel",
+    "ipywidgets",
+    "glob2>=0.7",
+    "imblearn>=0.0",
+]
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.uv.sources]
+torch  = { index = "pytorch-cu124" }
+triton = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url  = "https://download.pytorch.org/whl/cu124"
+explicit = true
