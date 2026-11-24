@@ -6430,6 +6430,7 @@ def run_specified_reward_patterns_env_pca(
     azim=30,
     figsize=(6, 5),
     tte_data=None,
+    return_raw=False,
 ):
     """Like run_specified_reward_patterns_pca, but drive the agent through the
     real treadmill environment (treadmill_env_jax) instead of a synthetic input
@@ -6569,6 +6570,14 @@ def run_specified_reward_patterns_env_pca(
     all_hidden = all_hidden[:, :T_used, :]
     all_inputs = all_inputs[:, :T_used, :]
     exit_times_flat = np.minimum(exit_times_flat, T_used)
+
+    if return_raw:
+        # Rollout arrays only, for callers that build their own figures.
+        return dict(all_hidden=all_hidden, all_inputs=all_inputs,
+                    exit_sites_flat=exit_sites_flat, exit_times_flat=exit_times_flat,
+                    net_params=net_params, reward_patterns_X=reward_patterns_X,
+                    n_initial_states=n_initial_states, n_patterns=n_patterns,
+                    n_sites=n_sites)
 
     return plot_reward_pattern_results(
         all_inputs, reward_patterns_X, network, ckpt_path, train_state,

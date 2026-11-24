@@ -16,11 +16,11 @@ read -r -a GPUS <<< "${GPUS:-0 1}"
 NG=${#GPUS[@]}
 
 CONFIGS=(
-    training_configs/high_becomes_low_from_full_net0.json
-    training_configs/high_becomes_low_from_full_net1.json
-    training_configs/high_becomes_low_from_full_net2.json
-    training_configs/high_becomes_low_from_full_net3.json
-    training_configs/high_becomes_low_from_full_net4.json
+    training_configs/high_becomes_low/high_becomes_low_from_full_net0.json
+    training_configs/high_becomes_low/high_becomes_low_from_full_net1.json
+    training_configs/high_becomes_low/high_becomes_low_from_full_net2.json
+    training_configs/high_becomes_low/high_becomes_low_from_full_net3.json
+    training_configs/high_becomes_low/high_becomes_low_from_full_net4.json
 )
 
 LOG_DIR="logs/high_becomes_low_full_nets_$(date +%Y%m%d_%H%M%S)"
@@ -36,7 +36,7 @@ run_lane() {
         cfg="${CONFIGS[$i]}"
         base="$(basename "${cfg}" .json)"
         echo ">>> [GPU ${gpu}] START ${base}"
-        CUDA_VISIBLE_DEVICES="${gpu}" python3 code/scripts/train_treadmill_agent_jax_curriculum.py \
+        CUDA_VISIBLE_DEVICES="${gpu}" uv run python code/scripts/train_treadmill_agent_jax_curriculum.py \
             --config "${cfg}" \
             > "${LOG_DIR}/${base}.log" 2>&1
         echo "<<< [GPU ${gpu}] DONE  ${base}  (log: ${LOG_DIR}/${base}.log)"

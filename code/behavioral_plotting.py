@@ -1091,8 +1091,10 @@ def plot_multi_df_accuracy_heatmap(odor_site_dfs, predictors, df_labels=None, fi
 
 def plot_leave_probabilities(odor_site_dfs, predictors, dataset_labels=None,
                              x_labels=None, cmap=None, cmap_values=None,
-                             colorbar_label='Dataset', save_dir=None, figsize=(3, 2)):
-    """Leave (stop) probability vs. each predictor for multiple datasets.
+                             colorbar_label='Dataset', save_dir=None, figsize=(3, 2),
+                             plot_leave=False, patch_types=None,
+                             patch_type_col='patch_type'):
+    """Stop/leave probability vs. each predictor for multiple datasets.
 
     x_labels       : optional list of x-axis label strings, one per predictor.
                      Falls back to the predictor name (underscores replaced) if None.
@@ -1104,7 +1106,13 @@ def plot_leave_probabilities(odor_site_dfs, predictors, dataset_labels=None,
                      and cmap is set, curves are spaced evenly by index.
     colorbar_label : label for the colorbar (default: 'Dataset').
     save_dir       : if given, each figure is saved as an SVG in this directory,
-                     named 'leave_prob_<predictor>.svg'.
+                     named 'leave_prob_<predictor>.svg' (with '_patch<t>' appended
+                     when patch_types is used).
+    plot_leave     : if True, plot P(leave) = 1 - P(stay) instead of the stay
+                     probability; the confidence band is flipped to match.
+    patch_types    : optional iterable of patch types. If given, one figure is made
+                     per patch type, each using only rows where
+                     df[patch_type_col] == t, and the type is shown in the title.
     """
     import os
     from matplotlib.cm import ScalarMappable
@@ -1127,28 +1135,41 @@ def plot_leave_probabilities(odor_site_dfs, predictors, dataset_labels=None,
     else:
         colors = [None] * n_dfs
 
-    for predictor, x_label in zip(predictors, x_labels):
-        fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
-        for df, label, color in zip(odor_site_dfs, dataset_labels, colors):
-            agg  = df.groupby(predictor)['stopped'].agg(['sum', 'count'])
-            k, n = agg['sum'].values, agg['count'].values
-            p    = k / n
-            ci   = clopper_pearson(k, n)
-            x    = agg.index.values
-            line, = ax.plot(x, p, 'o-', ms=3, lw=0.8, label=label, color=color)
-            c = line.get_color()
-            ax.fill_between(x, ci[0], ci[1], alpha=0.2, color=c)
-        ax.set_ylabel('Stay probability', fontsize=11)
-        ax.set_xlabel(x_label, fontsize=11)
-        format_plot(ax)
-        if cmap is not None:
-            sm = ScalarMappable(cmap=cmap_obj, norm=norm)
-            sm.set_array([])
-            cb = fig.colorbar(sm, ax=ax, label=colorbar_label)
-            cb.outline.set_visible(False)
-        if save_dir is not None:
-            os.makedirs(save_dir, exist_ok=True)
-            fig.savefig(os.path.join(save_dir, f'leave_prob_{predictor}.svg'), format='svg')
+    ylabel = 'P(leave)' if plot_leave else 'P(stay)'
+    pt_list = [None] if patch_types is None else list(patch_types)
+
+    for pt in pt_list:
+        for predictor, x_label in zip(predictors, x_labels):
+            fig, ax = plt.subplots(1, 1, figsize=figsize, constrained_layout=True)
+            for df, label, color in zip(odor_site_dfs, dataset_labels, colors):
+                sub = df if pt is None else df[df[patch_type_col] == pt]
+                if len(sub) == 0:
+                    continue
+                agg  = sub.groupby(predictor)['stopped'].agg(['sum', 'count'])
+                k, n = agg['sum'].values, agg['count'].values
+                p    = k / n
+                lo, hi = clopper_pearson(k, n)
+                if plot_leave:
+                    # P(leave) = 1 - P(stay); the band flips with the point estimate.
+                    p, lo, hi = 1 - p, 1 - hi, 1 - lo
+                x    = agg.index.values
+                line, = ax.plot(x, p, 'o-', ms=3, lw=0.8, label=label, color=color)
+                ax.fill_between(x, lo, hi, alpha=0.2, color=line.get_color())
+            ax.set_ylabel(ylabel, fontsize=11)
+            ax.set_xlabel(x_label, fontsize=11)
+            if pt is not None:
+                ax.set_title(f'Patch type {pt}', fontsize=11)
+            format_plot(ax)
+            if cmap is not None:
+                sm = ScalarMappable(cmap=cmap_obj, norm=norm)
+                sm.set_array([])
+                cb = fig.colorbar(sm, ax=ax, label=colorbar_label)
+                cb.outline.set_visible(False)
+            if save_dir is not None:
+                os.makedirs(save_dir, exist_ok=True)
+                stem = f'leave_prob_{predictor}' + ('' if pt is None else f'_patch{pt}')
+                fig.savefig(os.path.join(save_dir, f'{stem}.svg'), format='svg',
+                            bbox_inches='tight')
     plt.show()
 
 

@@ -7,7 +7,9 @@ dependencies = [
     "jax[cuda12]",
     "flax",
     "optax",
-    "orbax-checkpoint",
+    # 0.11.24+ calls jax.monitoring.record_scalar, absent in the jax 0.5.x this resolves to,
+    # but its metadata only declares jax>=0.5.0 so the resolver cannot catch it.
+    "orbax-checkpoint<0.11.24",
     "chex",
     "dm-tree",
     "ml-dtypes",
